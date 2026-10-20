@@ -1,9 +1,13 @@
-//! Search thread. Owns the engine and the icon cache so the UI thread only
-//! ever paints. Bursts of keystrokes are coalesced to the latest query.
+//! Search thread. Owns the engine so the UI thread only ever paints. Bursts
+//! of keystrokes are coalesced to the latest query.
+//!
+//! Icons come from a second thread: shell icon extraction can take hundreds
+//! of milliseconds (or hang inside a third-party handler), so results are
+//! posted at once with the icons already cached and the rest follow.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -19,13 +23,15 @@ use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingN
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows::core::HSTRING;
 
-use crate::WM_APP_RESULTS;
+use crate::{WM_APP_ICONS, WM_APP_RESULTS};
 
 pub enum Req {
     Query { generation: u64, query: String },
     Launched(Hit),
     Sources(Sources),
     RefreshApps,
+    /// A fresh app list from the refresh thread.
+    Apps(Vec<apps::App>),
 }
 
 pub struct Icon {
@@ -42,19 +48,87 @@ pub struct Resp {
     pub scanning: bool,
 }
 
+/// Icons for hits of an already posted `Resp` (by index).
+pub struct Icons {
+    pub generation: u64,
+    pub icons: Vec<(usize, Arc<Icon>)>,
+}
+
+type IconCache = Arc<Mutex<HashMap<String, Option<Arc<Icon>>>>>;
+
+/// Icons still to extract for one response: (hit index, cache key, target).
+struct IconReq {
+    generation: u64,
+    missing: Vec<(usize, String, String)>,
+}
+
 const ICON_PX: i32 = 48;
 
 pub fn spawn(hwnd: HWND, data_dir: PathBuf, sources: Sources) -> Sender<Req> {
     let (tx, rx) = mpsc::channel();
+    let (icon_tx, icon_rx) = mpsc::channel();
+    let cache = IconCache::default();
     let hwnd = hwnd.0 as isize;
+    let icon_cache = cache.clone();
+    std::thread::Builder::new()
+        .name("icons".into())
+        .spawn(move || run_icons(icon_rx, HWND(hwnd as *mut _), icon_cache))
+        .expect("spawn icon thread");
     std::thread::Builder::new()
         .name("search".into())
-        .spawn(move || run(rx, HWND(hwnd as *mut _), data_dir, sources))
+        .spawn({
+            let tx = tx.clone();
+            move || run(rx, tx, HWND(hwnd as *mut _), data_dir, sources, cache, icon_tx)
+        })
         .expect("spawn search thread");
     tx
 }
 
-fn run(rx: Receiver<Req>, hwnd: HWND, data_dir: PathBuf, sources: Sources) {
+fn post<T>(hwnd: HWND, msg: u32, payload: Box<T>) {
+    let ptr = Box::into_raw(payload);
+    unsafe {
+        if PostMessageW(Some(hwnd), msg, WPARAM(0), LPARAM(ptr as isize)).is_err() {
+            drop(Box::from_raw(ptr));
+        }
+    }
+}
+
+fn run_icons(rx: Receiver<IconReq>, hwnd: HWND, cache: IconCache) {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+    while let Ok(req) = rx.recv() {
+        // Only the latest results still need icons.
+        let req = rx.try_iter().last().unwrap_or(req);
+        let mut icons = Vec::new();
+        for (i, key, target) in req.missing {
+            let cached = cache.lock().unwrap().get(&key).cloned();
+            let icon = cached.unwrap_or_else(|| {
+                let icon = extract_icon(&target).map(Arc::new);
+                let mut c = cache.lock().unwrap();
+                if c.len() > 512 {
+                    c.clear();
+                }
+                c.insert(key, icon.clone());
+                icon
+            });
+            icons.extend(icon.map(|icon| (i, icon)));
+        }
+        if !icons.is_empty() {
+            post(hwnd, WM_APP_ICONS, Box::new(Icons { generation: req.generation, icons }));
+        }
+    }
+}
+
+fn run(
+    rx: Receiver<Req>,
+    tx: Sender<Req>,
+    hwnd: HWND,
+    data_dir: PathBuf,
+    sources: Sources,
+    cache: IconCache,
+    icon_tx: Sender<IconReq>,
+) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
@@ -64,7 +138,6 @@ fn run(rx: Receiver<Req>, hwnd: HWND, data_dir: PathBuf, sources: Sources) {
     let mut engine = Engine::new(apps::enumerate(), Some(files), Some(&data_dir));
     engine.set_tasks(apps::enumerate_tasks());
     engine.sources = sources;
-    let mut icons: HashMap<String, Option<Arc<Icon>>> = HashMap::new();
     let mut last: Option<(u64, String)> = None;
     let mut apps_loaded = Instant::now();
 
@@ -94,6 +167,7 @@ fn run(rx: Receiver<Req>, hwnd: HWND, data_dir: PathBuf, sources: Sources) {
                 Req::Launched(hit) => engine.record_launch(&hit),
                 Req::Sources(s) => engine.sources = s,
                 Req::RefreshApps => refresh_apps = true,
+                Req::Apps(list) => engine.set_apps(list),
             }
         }
         if let Some(q) = query {
@@ -102,17 +176,23 @@ fn run(rx: Receiver<Req>, hwnd: HWND, data_dir: PathBuf, sources: Sources) {
         let Some((generation, q)) = &last else { continue };
 
         let results = engine.search(q);
-        if icons.len() > 512 {
-            icons.clear();
-        }
-        let icon_list = results
-            .hits
-            .iter()
-            .map(|h| {
-                let key = icon_key(h)?;
-                icons.entry(key).or_insert_with(|| extract_icon(&h.target).map(Arc::new)).clone()
-            })
-            .collect();
+        let mut missing = Vec::new();
+        let icon_list = {
+            let cache = cache.lock().unwrap();
+            results
+                .hits
+                .iter()
+                .enumerate()
+                .map(|(i, h)| {
+                    let key = icon_key(h)?;
+                    let icon = cache.get(&key).cloned();
+                    if icon.is_none() {
+                        missing.push((i, key, h.target.clone()));
+                    }
+                    icon.flatten()
+                })
+                .collect()
+        };
         let (file_count, scanning) = engine
             .files()
             .map_or((0, false), |f| (f.file_count(), f.is_scanning()));
@@ -123,16 +203,18 @@ fn run(rx: Receiver<Req>, hwnd: HWND, data_dir: PathBuf, sources: Sources) {
             file_count: file_count + engine.app_count(),
             scanning,
         });
-        let ptr = Box::into_raw(resp);
-        unsafe {
-            if PostMessageW(Some(hwnd), WM_APP_RESULTS, WPARAM(0), LPARAM(ptr as isize)).is_err() {
-                drop(Box::from_raw(ptr));
-            }
+        post(hwnd, WM_APP_RESULTS, resp);
+        if !missing.is_empty() {
+            let _ = icon_tx.send(IconReq { generation: *generation, missing });
         }
-        // Pick up newly installed apps, after the user already has results.
+        // Pick up newly installed apps. Enumerating takes ~300 ms, so it
+        // runs on its own short-lived thread and searches never wait for it.
         if refresh_apps && apps_loaded.elapsed() > Duration::from_secs(60) {
-            engine.set_apps(apps::enumerate());
             apps_loaded = Instant::now();
+            let tx = tx.clone();
+            let _ = std::thread::Builder::new()
+                .name("apps".into())
+                .spawn(move || tx.send(Req::Apps(apps::enumerate())));
         }
     }
 }

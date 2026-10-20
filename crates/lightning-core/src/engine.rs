@@ -11,7 +11,7 @@ use crate::settings::SETTINGS;
 pub const MAX_APPS: usize = 5;
 pub const MAX_FILES: usize = 6;
 pub const MAX_SETTINGS: usize = 5;
-const MAX_RECENT: usize = 6;
+const MAX_RECENT: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {

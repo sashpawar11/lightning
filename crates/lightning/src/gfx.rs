@@ -410,8 +410,11 @@ pub mod glyph {
     pub const APPS: &str = "\u{E71D}";
     pub const PAGE: &str = "\u{E7C3}";
     pub const SETTING: &str = "\u{E713}";
+    pub const MINIMIZE: &str = "\u{E921}";
     pub const WIFI: &str = "\u{E701}";
-    pub const DISPLAY: &str = "\u{E7F4}";
     pub const VOLUME: &str = "\u{E767}";
+    pub const MUTE: &str = "\u{E74F}";
+    pub const DARK: &str = "\u{E708}";
+    pub const LIGHT: &str = "\u{E706}";
     pub const BLUETOOTH: &str = "\u{E702}";
 }

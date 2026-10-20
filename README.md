@@ -183,10 +183,13 @@ wallpaper. The **Glass** slider in settings sets the panel's tint over the blur.
 
 ### Behaviour
 
-With **Always on top** (default) the overlay stays up when another window takes
-focus; it hides on Esc, the hotkey, or after you open something, and when it's
-visible but unfocused the hotkey brings focus back. Turn it off to have the
-overlay close as soon as it loses focus.
+By default the overlay closes as soon as it loses focus. Turn on **Always on
+top** to keep it up when another window takes focus; it then hides on Esc, the
+hotkey, or after you open something, and when it's visible but unfocused the
+hotkey brings focus back.
+
+The quick settings tiles switch Wi‑Fi, Bluetooth, sound (mute) and dark mode
+directly, and show each one's current state.
 
 ## License
 

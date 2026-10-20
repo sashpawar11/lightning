@@ -26,6 +26,7 @@ enum Ctl {
     Glass,
     Toggle(u8),
     Quit,
+    Close,
 }
 
 pub struct Settings {
@@ -122,6 +123,7 @@ impl Settings {
                 self.drag_to(x, cfg, fx);
             }
             Ctl::Quit => fx.push(Fx::Quit),
+            Ctl::Close => fx.push(Fx::HideSettings),
         }
         self.invalidate();
     }
@@ -204,9 +206,14 @@ impl Settings {
         t.fill_round(rect(PAD, 14.0, 26.0, 26.0), 7.0, pal.accent);
         t.text(glyph::BOLT, &f.icon14, rect(PAD, 14.0, 26.0, 26.0), pal.on_accent);
         t.text("Lightning", &f.heading, rect(PAD + 36.0, 14.0, 200.0, 26.0), pal.text);
+        // Minimize: hides the panel, like Esc or clicking away.
+        let close = rect(W - PAD - 26.0, 14.0, 26.0, 26.0);
+        t.fill_round_a(close, 7.0, pal.text, 0.06);
+        t.text(glyph::MINIMIZE, &f.icon14, close, pal.text);
+        self.hits.push((close, Ctl::Close));
         let ver = concat!("v", env!("CARGO_PKG_VERSION"));
         let vw = gfx.text_width(ver, &f.small);
-        t.text(ver, &f.small, rect(W - PAD - vw, 14.0, vw + 2.0, 26.0), pal.muted);
+        t.text(ver, &f.small, rect(close.left - 10.0 - vw, 14.0, vw + 2.0, 26.0), pal.muted);
         t.fill_a(rect(0.0, 54.0, W, 1.0), pal.text, 0.08);
 
         let mut y = 54.0 + PAD;

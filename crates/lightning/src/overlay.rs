@@ -5,36 +5,51 @@ use std::sync::Arc;
 
 use lightning_core::{Hit, Kind};
 use windows::Win32::Foundation::HWND;
+use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
 
 use crate::gfx::{Gfx, Target, caret_x, glyph, rect};
+use crate::quick::{self, States};
 use crate::theme::Palette;
-use crate::worker::{Icon, Resp};
+use crate::worker::{Icon, Icons, Resp};
 use crate::{Fx, platform};
 
 pub const W: f32 = 680.0;
 const HEADER: f32 = 64.0;
 const LIST_Y: f32 = 65.0;
-const LIST_H: f32 = 372.0;
+/// The list grows with its content up to this height, then scrolls.
+const MAX_LIST_H: f32 = 372.0;
+const MIN_LIST_H: f32 = 120.0;
 const FOOT_H: f32 = 36.0;
-pub const H: f32 = LIST_Y + LIST_H + FOOT_H;
 const ROW_H: f32 = 48.0;
 const ROW_STEP: f32 = 50.0;
-const TILE_H: f32 = 64.0;
+const TILE_H: f32 = 52.0;
+/// Recents grid: columns, and the height of one row of tiles.
+const COLS: usize = 6;
+const GRID_H: f32 = 80.0;
+const CELL_W: f32 = (W - 40.0) / COLS as f32;
 
-pub const QUICK_SETTINGS: [(&str, &str, &str); 4] = [
-    ("Wi‑Fi", glyph::WIFI, "ms-settings:network-wifi"),
-    ("Display", glyph::DISPLAY, "ms-settings:display"),
-    ("Sound", glyph::VOLUME, "ms-settings:sound"),
-    ("Bluetooth", glyph::BLUETOOTH, "ms-settings:bluetooth"),
-];
+const TILE_W: f32 = (W - 40.0 - 24.0) / 4.0;
+
+fn tile_rect(k: usize, y: f32) -> D2D_RECT_F {
+    rect(20.0 + k as f32 * (TILE_W + 8.0), y, TILE_W, TILE_H)
+}
+
+/// Controls with a hover state that isn't the selection.
+#[derive(Clone, Copy, PartialEq)]
+enum Hover {
+    Tile(usize),
+    Gear,
+}
 
 #[derive(Clone, Copy)]
 enum Item {
     Label(&'static str),
     Row(usize),
+    /// A row of recent tiles, starting at this hit index.
+    Grid(usize),
     Tiles,
     Empty,
 }
@@ -59,6 +74,9 @@ pub struct Overlay {
     pub indexed: usize,
     pub scanning: bool,
     pub caret_on: bool,
+    pub quick: States,
+    hover: Option<Hover>,
+    recents: (Vec<Hit>, Vec<Option<Arc<Icon>>>),
     last_mouse: (i32, i32),
 }
 
@@ -84,6 +102,9 @@ impl Overlay {
             indexed: 0,
             scanning: true,
             caret_on: true,
+            quick: [None; 4],
+            hover: None,
+            recents: (Vec::new(), Vec::new()),
             last_mouse: (i32::MIN, i32::MIN),
         }
     }
@@ -98,10 +119,18 @@ impl Overlay {
         }
     }
 
+    /// Every show starts a fresh search.
     pub fn on_show(&mut self) {
-        self.select_all = !self.query.is_empty();
-        self.caret = self.query.len();
+        self.query.clear();
+        self.caret = 0;
+        self.select_all = false;
+        // The last recents, so the window opens at its final size.
+        (self.hits, self.icons) = self.recents.clone();
+        self.results_query = Some(String::new());
+        self.sel = 0;
+        self.scroll = 0.0;
         self.caret_on = true;
+        self.hover = None;
         self.last_mouse = (i32::MIN, i32::MIN);
     }
 
@@ -121,6 +150,9 @@ impl Overlay {
         self.hits = resp.results.hits;
         self.icons = resp.icons;
         self.results_query = Some(resp.results.query);
+        if self.results_query.as_deref() == Some("") {
+            self.recents = (self.hits.clone(), self.icons.clone());
+        }
         if same_query {
             self.sel = self.sel.min(self.hits.len().saturating_sub(1));
         } else {
@@ -130,6 +162,21 @@ impl Overlay {
         // Drop bitmaps for icons no longer referenced.
         let live: Vec<usize> = self.icons.iter().flatten().map(|i| Arc::as_ptr(i) as usize).collect();
         self.bitmaps.retain(|k, _| live.contains(k));
+        self.invalidate();
+    }
+
+    pub fn on_icons(&mut self, icons: Icons) {
+        if icons.generation != self.generation {
+            return;
+        }
+        for (i, icon) in icons.icons {
+            if let Some(slot) = self.icons.get_mut(i) {
+                *slot = Some(icon);
+            }
+        }
+        if self.results_query.as_deref() == Some("") {
+            self.recents.1 = self.icons.clone();
+        }
         self.invalidate();
     }
 
@@ -176,6 +223,10 @@ impl Overlay {
             // One press always closes; the query is kept and pre-selected
             // on the next show, so typing replaces it.
             0x1B => fx.push(Fx::HideOverlay),
+            0x28 if self.idle() => self.move_grid(COLS as isize),
+            0x26 if self.idle() => self.move_grid(-(COLS as isize)),
+            0x27 if self.idle() => self.move_sel(1),
+            0x25 if self.idle() => self.move_sel(-1),
             0x28 => self.move_sel(1),
             0x26 => self.move_sel(-1),
             0x22 => self.move_sel(5),
@@ -258,6 +309,18 @@ impl Overlay {
         self.invalidate();
     }
 
+    fn idle(&self) -> bool {
+        self.query.trim().is_empty()
+    }
+
+    /// Up/down in the recents grid: only when a tile is there.
+    fn move_grid(&mut self, d: isize) {
+        let to = self.sel as isize + d;
+        if (0..self.hits.len() as isize).contains(&to) {
+            self.move_sel(d);
+        }
+    }
+
     fn move_sel(&mut self, d: isize) {
         if self.hits.is_empty() {
             return;
@@ -270,15 +333,19 @@ impl Overlay {
 
     fn ensure_visible(&mut self) {
         for (y, h, item) in self.layout() {
-            if let Item::Row(i) = item
-                && i == self.sel
-            {
+            let hit = match item {
+                Item::Row(i) => i == self.sel,
+                Item::Grid(start) => (start..start + COLS).contains(&self.sel),
+                _ => false,
+            };
+            if hit {
+                let i = self.sel;
                 // Keep the group label visible when selecting a group's first row.
                 let top = if i == 0 { 0.0 } else { y - 4.0 };
                 if top < self.scroll {
                     self.scroll = top;
-                } else if y + h + 8.0 > self.scroll + LIST_H {
-                    self.scroll = y + h + 8.0 - LIST_H;
+                } else if y + h + 8.0 > self.scroll + self.list_h() {
+                    self.scroll = y + h + 8.0 - self.list_h();
                 }
             }
         }
@@ -293,7 +360,7 @@ impl Overlay {
     // ---------------------------------------------------------------- mouse
 
     fn item_at(&self, y_dip: f32) -> Option<Item> {
-        if !(LIST_Y..LIST_Y + LIST_H).contains(&y_dip) {
+        if !(LIST_Y..LIST_Y + self.list_h()).contains(&y_dip) {
             return None;
         }
         let cy = y_dip - LIST_Y + self.scroll;
@@ -301,6 +368,18 @@ impl Overlay {
             .into_iter()
             .find(|&(y, h, _)| cy >= y && cy < y + h)
             .map(|(_, _, it)| it)
+    }
+
+    /// The hit under a point (DIPs), list rows and recent tiles alike.
+    fn hit_at(&self, x: f32, y: f32) -> Option<usize> {
+        match self.item_at(y)? {
+            Item::Row(i) => Some(i),
+            Item::Grid(start) => {
+                let i = start + ((x - 20.0) / CELL_W).floor().clamp(0.0, COLS as f32 - 1.0) as usize;
+                ((20.0..W - 20.0).contains(&x) && i < self.hits.len()).then_some(i)
+            }
+            _ => None,
+        }
     }
 
     pub fn on_mouse_move(&mut self, x: i32, y: i32) {
@@ -312,7 +391,13 @@ impl Overlay {
         if first {
             return; // The window appearing under a still cursor isn't a hover.
         }
-        if let Some(Item::Row(i)) = self.item_at(y as f32 * 96.0 / self.dpi)
+        let s = 96.0 / self.dpi;
+        let hover = self.hover_at(x as f32 * s, y as f32 * s);
+        if hover != self.hover {
+            self.hover = hover;
+            self.invalidate();
+        }
+        if let Some(i) = self.hit_at(x as f32 * s, y as f32 * s)
             && i != self.sel
         {
             self.sel = i;
@@ -322,20 +407,52 @@ impl Overlay {
 
     pub fn on_click(&mut self, x: i32, y: i32, fx: &mut Vec<Fx>) {
         let (x, y) = (x as f32 * 96.0 / self.dpi, y as f32 * 96.0 / self.dpi);
-        match self.item_at(y) {
-            Some(Item::Row(i)) => self.launch(i, ctrl_down(), fx),
-            Some(Item::Tiles) => {
-                let col = ((x - 20.0) / ((W - 40.0) / 4.0)).floor();
-                if (0.0..4.0).contains(&col) {
-                    fx.push(Fx::Open(QUICK_SETTINGS[col as usize].2.into()));
+        if let Some(i) = self.hit_at(x, y) {
+            self.launch(i, ctrl_down(), fx);
+            return;
+        }
+        match self.hover_at(x, y) {
+            Some(Hover::Tile(k)) => {
+                if let Some(on) = self.quick[k] {
+                    // Flip now; the quick thread posts the real state back.
+                    self.quick[k] = Some(!on);
+                    fx.push(Fx::Quick(k, !on));
+                    self.invalidate();
                 }
             }
-            _ => {}
+            Some(Hover::Gear) => fx.push(Fx::ShowSettings),
+            None => {}
+        }
+    }
+
+    /// Quick settings tile or footer gear under a point (DIPs).
+    fn hover_at(&self, x: f32, y: f32) -> Option<Hover> {
+        let g = self.gear_rect();
+        if x >= g.left && x < g.right && y >= g.top && y < g.bottom {
+            return Some(Hover::Gear);
+        }
+        if !matches!(self.item_at(y), Some(Item::Tiles)) {
+            return None;
+        }
+        (0..4).find(|&k| {
+            let r = tile_rect(k, 0.0);
+            x >= r.left && x < r.right
+        })
+        .map(Hover::Tile)
+    }
+
+    fn gear_rect(&self) -> D2D_RECT_F {
+        rect(W - 20.0 - 26.0, LIST_Y + self.list_h() + 5.0, 26.0, 26.0)
+    }
+
+    pub fn on_mouse_leave(&mut self) {
+        if self.hover.take().is_some() {
+            self.invalidate();
         }
     }
 
     pub fn on_wheel(&mut self, delta: i16) {
-        let max = (self.content_height() - LIST_H).max(0.0);
+        let max = (self.content_height() - self.list_h()).max(0.0);
         self.scroll = (self.scroll - delta as f32 / 120.0 * ROW_STEP).clamp(0.0, max);
         self.invalidate();
     }
@@ -348,10 +465,16 @@ impl Overlay {
         let mut y = 6.0;
         let idle = self.query.trim().is_empty();
         let mut prev: Option<Kind> = None;
-        for (i, h) in self.hits.iter().enumerate() {
-            let label = if idle {
-                (i == 0).then_some("Recent")
-            } else if prev != Some(h.kind) {
+        if idle && !self.hits.is_empty() {
+            out.push((y, 26.0, Item::Label("Recent")));
+            y += 26.0;
+            for start in (0..self.hits.len()).step_by(COLS) {
+                out.push((y, GRID_H, Item::Grid(start)));
+                y += GRID_H;
+            }
+        }
+        for (i, h) in self.hits.iter().enumerate().filter(|_| !idle) {
+            let label = if prev != Some(h.kind) {
                 Some(match h.kind {
                     Kind::App => "Applications",
                     Kind::File => "Files",
@@ -382,6 +505,15 @@ impl Overlay {
 
     fn content_height(&self) -> f32 {
         self.layout().last().map_or(0.0, |(y, h, _)| y + h + 8.0)
+    }
+
+    fn list_h(&self) -> f32 {
+        self.content_height().clamp(MIN_LIST_H, MAX_LIST_H)
+    }
+
+    /// Window height (DIPs) that fits the current content.
+    pub fn height(&self) -> f32 {
+        LIST_Y + self.list_h() + FOOT_H
     }
 
     // ---------------------------------------------------------------- paint
@@ -432,22 +564,46 @@ impl Overlay {
         t.fill_a(rect(0.0, HEADER, W, 1.0), pal.text, 0.08);
 
         // List
-        t.clip(rect(0.0, LIST_Y, W, LIST_H));
+        let list_h = self.list_h();
+        t.clip(rect(0.0, LIST_Y, W, list_h));
         for (y, h, item) in self.layout() {
             let y = LIST_Y + y - self.scroll;
-            if y + h < LIST_Y || y > LIST_Y + LIST_H {
+            if y + h < LIST_Y || y > LIST_Y + list_h {
                 continue;
             }
             match item {
                 Item::Label(l) => t.text(l, &f.label, rect(20.0, y + h - 22.0, 300.0, 16.0), pal.muted),
                 Item::Row(i) => self.paint_row(gfx, t, pal, i, y),
+                Item::Grid(start) => {
+                    for i in start..(start + COLS).min(self.hits.len()) {
+                        self.paint_tile(gfx, t, pal, i, 20.0 + (i - start) as f32 * CELL_W, y);
+                    }
+                }
                 Item::Tiles => {
-                    let tw = (W - 40.0 - 24.0) / 4.0;
-                    for (k, (label, g, _)) in QUICK_SETTINGS.iter().enumerate() {
-                        let r = rect(20.0 + k as f32 * (tw + 8.0), y, tw, TILE_H);
-                        t.fill_round_a(r, 10.0, pal.text, 0.05);
-                        t.text(g, &f.icon18, rect(r.left, y + 10.0, tw, 24.0), pal.text);
-                        t.text(label, &f.small_center, rect(r.left, y + 38.0, tw, 16.0), pal.text);
+                    let tw = TILE_W;
+                    for (k, state) in self.quick.into_iter().enumerate() {
+                        let r = tile_rect(k, y);
+                        let (g, name, status) = quick::describe(k, state);
+                        // The theme tile names the current mode; it has no "off".
+                        let lit = state == Some(true) && k != quick::THEME;
+                        let hovered = self.hover == Some(Hover::Tile(k)) && state.is_some();
+                        let (ink, sub) = if lit {
+                            t.fill_round(r, 10.0, pal.accent);
+                            if hovered {
+                                t.fill_round_a(r, 10.0, pal.on_accent, 0.08);
+                            }
+                            (pal.on_accent, pal.on_accent)
+                        } else if state.is_some() {
+                            t.fill_round_a(r, 10.0, pal.text, if hovered { 0.11 } else { 0.06 });
+                            (pal.text, pal.muted)
+                        } else {
+                            t.fill_round_a(r, 10.0, pal.text, 0.03);
+                            (pal.muted, pal.muted)
+                        };
+                        t.text(g, &f.icon18, rect(r.left + 8.0, y, 36.0, TILE_H), ink);
+                        let tx = r.left + 48.0;
+                        t.text(name, &f.title, rect(tx, y + 8.0, tw - 56.0, 19.0), ink);
+                        t.text(status, &f.small, rect(tx, y + 27.0, tw - 56.0, 16.0), sub);
                     }
                 }
                 Item::Empty => {
@@ -459,7 +615,7 @@ impl Overlay {
         t.unclip();
 
         // Footer
-        let fy = LIST_Y + LIST_H;
+        let fy = LIST_Y + list_h;
         t.fill_a(rect(0.0, fy, W, FOOT_H), pal.text, 0.03);
         t.fill_a(rect(0.0, fy, W, 1.0), pal.text, 0.08);
         let left = if self.scanning {
@@ -468,9 +624,15 @@ impl Overlay {
             format!("{} indexed", group(self.indexed))
         };
         t.text(&left, &f.small, rect(20.0, fy, 300.0, FOOT_H), pal.muted);
-        let hints = "↑↓ Navigate     Enter Open     Ctrl+Enter Reveal     Esc Close";
+        let gear = self.gear_rect();
+        if self.hover == Some(Hover::Gear) {
+            t.fill_round_a(gear, 6.0, pal.text, 0.08);
+        }
+        let ink = if self.hover == Some(Hover::Gear) { pal.text } else { pal.muted };
+        t.text(glyph::SETTING, &f.icon14, gear, ink);
+        let hints = if idle { "Esc Close" } else { "Ctrl+Enter Reveal     Esc Close" };
         let hw = gfx.text_width(hints, &f.small);
-        t.text(hints, &f.small, rect(W - 20.0 - hw, fy, hw + 2.0, FOOT_H), pal.muted);
+        t.text(hints, &f.small, rect(gear.left - 12.0 - hw, fy, hw + 2.0, FOOT_H), pal.muted);
 
         if t.end() {
             self.target = Some(target);
@@ -480,13 +642,9 @@ impl Overlay {
         }
     }
 
-    fn paint_row(&mut self, gfx: &Gfx, t: &Target, pal: &Palette, i: usize, y: f32) {
-        let f = &gfx.fonts;
-        let hit = &self.hits[i];
-        let selected = i == self.sel;
-        if selected {
-            t.fill_round_a(rect(10.0, y, W - 20.0, ROW_H), 10.0, pal.text, if pal.dark { 0.08 } else { 0.06 });
-        }
+    /// Draws hit `i`'s icon centered in `tile`: the real icon at `size`, or
+    /// a kind glyph on a soft square.
+    fn paint_icon(&mut self, gfx: &Gfx, t: &Target, pal: &Palette, i: usize, tile: D2D_RECT_F, size: f32) {
         let bmp = self.icons.get(i).and_then(|o| o.as_ref()).and_then(|icon| {
             let key = Arc::as_ptr(icon) as usize;
             if !self.bitmaps.contains_key(&key)
@@ -497,17 +655,37 @@ impl Overlay {
             self.bitmaps.get(&key)
         });
         if let Some(b) = bmp {
-            t.bitmap(b, rect(23.0, y + 11.0, 26.0, 26.0));
+            let (cx, cy) = ((tile.left + tile.right) / 2.0, (tile.top + tile.bottom) / 2.0);
+            t.bitmap(b, rect(cx - size / 2.0, cy - size / 2.0, size, size));
         } else {
-            let g = match hit.kind {
+            let g = match self.hits[i].kind {
                 Kind::App => glyph::APPS,
                 Kind::File => glyph::PAGE,
                 Kind::Setting => glyph::SETTING,
             };
-            let tile = rect(20.0, y + 8.0, 32.0, 32.0);
             t.fill_round_a(tile, 8.0, pal.text, 0.07);
-            t.text(g, &f.icon14, tile, pal.text);
+            t.text(g, &gfx.fonts.icon14, tile, pal.text);
         }
+    }
+
+    fn paint_tile(&mut self, gfx: &Gfx, t: &Target, pal: &Palette, i: usize, x: f32, y: f32) {
+        if i == self.sel {
+            let r = rect(x + 2.0, y, CELL_W - 4.0, GRID_H - 4.0);
+            t.fill_round_a(r, 10.0, pal.text, if pal.dark { 0.08 } else { 0.06 });
+        }
+        self.paint_icon(gfx, t, pal, i, rect(x + CELL_W / 2.0 - 16.0, y + 10.0, 32.0, 32.0), 32.0);
+        let title = &self.hits[i].title;
+        t.text(title, &gfx.fonts.small_center, rect(x + 6.0, y + 48.0, CELL_W - 12.0, 18.0), pal.text);
+    }
+
+    fn paint_row(&mut self, gfx: &Gfx, t: &Target, pal: &Palette, i: usize, y: f32) {
+        let f = &gfx.fonts;
+        let selected = i == self.sel;
+        if selected {
+            t.fill_round_a(rect(10.0, y, W - 20.0, ROW_H), 10.0, pal.text, if pal.dark { 0.08 } else { 0.06 });
+        }
+        self.paint_icon(gfx, t, pal, i, rect(20.0, y + 8.0, 32.0, 32.0), 26.0);
+        let hit = &self.hits[i];
         let tw = W - 64.0 - 90.0;
         t.text_hl(gfx, &hit.title, &hit.ranges, &f.title, rect(64.0, y + 5.0, tw, 22.0), pal.text, (pal.accent, pal.match_tint));
         t.text(&hit.subtitle, &f.small, rect(64.0, y + 26.0, tw, 16.0), pal.muted);

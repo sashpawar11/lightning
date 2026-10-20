@@ -35,7 +35,7 @@ impl Default for Config {
             search_files: true,
             search_settings: true,
             launch_at_startup: false,
-            always_on_top: true,
+            always_on_top: false,
         }
     }
 }

@@ -6,6 +6,7 @@ mod gfx;
 mod hotkey;
 mod overlay;
 mod platform;
+mod quick;
 mod settings_ui;
 mod theme;
 mod winkey;
@@ -21,7 +22,7 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
-use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
     PAINTSTRUCT,
@@ -33,7 +34,9 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
     SetProcessDpiAwarenessContext,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
@@ -53,6 +56,10 @@ const WM_APP_TRAY: u32 = WM_APP + 2;
 const WM_APP_SHOW: u32 = WM_APP + 3;
 /// A lone Windows-key tap (see `winkey`).
 const WM_APP_WINKEY: u32 = WM_APP + 4;
+/// Quick settings states, packed in WPARAM (see `quick`).
+pub const WM_APP_QUICK: u32 = WM_APP + 5;
+/// Icons that followed a results message (see `worker`).
+pub const WM_APP_ICONS: u32 = WM_APP + 6;
 const CARET_TIMER: usize = 1;
 const STATS_TIMER: usize = 2;
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
@@ -68,7 +75,10 @@ pub enum Fx {
     HideSettings,
     ToggleSettings,
     Launch { hit: Hit, reveal: bool },
-    Open(String),
+    /// Quick settings tile `i` switched to `on`.
+    Quick(usize, bool),
+    /// Resize the visible overlay to its content.
+    FitOverlay,
     TrayMenu,
     Quit,
     ApplyTheme,
@@ -85,6 +95,7 @@ struct App {
     cfg: Config,
     pal: Palette,
     worker: Sender<Req>,
+    quick: Sender<quick::Req>,
     overlay: Overlay,
     settings: Settings,
     tray_icon: HICON,
@@ -174,6 +185,7 @@ fn main() -> windows::core::Result<()> {
             cfg,
             pal,
             worker,
+            quick: quick::spawn(overlay_hwnd),
             overlay: Overlay::new(overlay_hwnd),
             settings: Settings::new(settings_hwnd, &roots),
             tray_icon,
@@ -334,19 +346,20 @@ fn run_one(f: Fx) {
         Fx::ShowOverlay => {
             let (work, dpi) = cursor_monitor();
             let s = dpi / 96.0;
-            let (w, h) = ((overlay::W * s).round() as i32, (overlay::H * s).round() as i32);
-            let x = work.left + (work.right - work.left - w) / 2;
-            let y = work.top + ((work.bottom - work.top) as f32 * 0.18) as i32;
-            let Some(hwnd) = with_app(|a| {
+            let Some((hwnd, h)) = with_app(|a| {
                 a.overlay.dpi = dpi;
                 a.overlay.on_show();
                 a.overlay.visible = true;
                 a.search();
                 let _ = a.worker.send(Req::RefreshApps);
-                a.overlay.hwnd
+                let _ = a.quick.send(quick::Req::Refresh);
+                (a.overlay.hwnd, a.overlay.height())
             }) else {
                 return;
             };
+            let (w, h) = ((overlay::W * s).round() as i32, (h * s).round() as i32);
+            let x = work.left + (work.right - work.left - w) / 2;
+            let y = work.top + ((work.bottom - work.top) as f32 * 0.18) as i32;
             place(hwnd, x, y, w, h);
             unsafe {
                 SetTimer(Some(hwnd), CARET_TIMER, 530, None);
@@ -377,7 +390,6 @@ fn run_one(f: Fx) {
             }
         }
         Fx::ShowSettings => {
-            run_one(Fx::HideOverlay);
             let (work, dpi) = cursor_monitor();
             let s = dpi / 96.0;
             let Some((hwnd, h)) = with_app(|a| {
@@ -391,6 +403,10 @@ fn run_one(f: Fx) {
             let (w, h) = ((settings_ui::W * s).round() as i32, (h * s).round() as i32);
             let m = (12.0 * s) as i32;
             place(hwnd, work.right - w - m, work.bottom - h - m, w, h);
+            // Hidden only now: while the overlay is still the foreground
+            // window, Windows lets Settings take focus (and so close on Esc
+            // or when clicking away).
+            run_one(Fx::HideOverlay);
             unsafe {
                 SetTimer(Some(hwnd), STATS_TIMER, 1000, None);
             }
@@ -428,9 +444,25 @@ fn run_one(f: Fx) {
                 with_app(|a| a.worker.send(Req::Launched(hit)));
             }
         }
-        Fx::Open(target) => {
-            run_one(Fx::HideOverlay);
-            platform::open(&target);
+        Fx::FitOverlay => {
+            let Some((hwnd, h, dpi)) =
+                with_app(|a| a.overlay.visible.then(|| (a.overlay.hwnd, a.overlay.height(), a.overlay.dpi))).flatten()
+            else {
+                return;
+            };
+            let h = (h * dpi / 96.0).round() as i32;
+            let mut rc = RECT::default();
+            unsafe {
+                let _ = GetWindowRect(hwnd, &mut rc);
+                if rc.bottom - rc.top != h {
+                    // Grows downward from a fixed top edge.
+                    let flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE;
+                    let _ = SetWindowPos(hwnd, None, 0, 0, rc.right - rc.left, h, flags);
+                }
+            }
+        }
+        Fx::Quick(i, on) => {
+            with_app(|a| a.quick.send(quick::Req::Set(i, on)));
         }
         Fx::TrayMenu => tray_menu(),
         Fx::Quit => unsafe { PostQuitMessage(0) },
@@ -555,7 +587,21 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             Some(LRESULT(0))
         }
         WM_MOUSEMOVE => {
+            // Ask for WM_MOUSELEAVE so hover highlights clear off-window.
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            unsafe {
+                let _ = TrackMouseEvent(&mut tme);
+            }
             with_app(|a| a.overlay.on_mouse_move(lo(lp), hi(lp)));
+            Some(LRESULT(0))
+        }
+        WM_MOUSELEAVE => {
+            with_app(|a| a.overlay.on_mouse_leave());
             Some(LRESULT(0))
         }
         WM_LBUTTONDOWN => {
@@ -598,6 +644,19 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 if a.settings.visible {
                     a.settings.invalidate();
                 }
+            });
+            fx.push(Fx::FitOverlay);
+            Some(LRESULT(0))
+        }
+        WM_APP_ICONS => {
+            let icons = unsafe { Box::from_raw(lp.0 as *mut worker::Icons) };
+            with_app(|a| a.overlay.on_icons(*icons));
+            Some(LRESULT(0))
+        }
+        WM_APP_QUICK => {
+            with_app(|a| {
+                a.overlay.quick = quick::unpack(wp.0);
+                a.overlay.invalidate();
             });
             Some(LRESULT(0))
         }
