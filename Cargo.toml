@@ -5,6 +5,7 @@ members = ["crates/lightning-core", "crates/lightning"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [workspace.dependencies]
 fff-search = "0.11.0"

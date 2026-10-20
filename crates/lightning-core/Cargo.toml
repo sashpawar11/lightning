@@ -2,6 +2,7 @@
 name = "lightning-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 fff-search.workspace = true
