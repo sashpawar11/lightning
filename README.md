@@ -18,7 +18,11 @@
 </p>
 
 <p align="center">
-  <img src="docs/search-dark.png" width="49%" alt="Searching apps in dark mode">
+  <img src="docs/overview-dark.png" width="80%" alt="Recent apps and files with quick settings in dark mode">
+</p>
+
+<p align="center">
+  <img src="docs/search-dark.png" width="49%" alt="Typo-tolerant settings search in dark mode">
   <img src="docs/search-light.png" width="49%" alt="Typo-tolerant Control Panel search in light mode">
 </p>
 
