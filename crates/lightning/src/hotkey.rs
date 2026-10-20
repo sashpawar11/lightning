@@ -8,6 +8,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 
 pub const HOTKEY_ID: i32 = 1;
 
+/// Config value for "tap the Windows key alone" (handled by `winkey`, not
+/// RegisterHotKey, which can't bind a lone modifier).
+pub const WIN_ONLY: &str = "Win";
+
+/// Keycap labels for a configured hotkey, e.g. `["Alt", "Space"]`.
+pub fn display_parts(s: &str) -> Option<Vec<String>> {
+    if s == WIN_ONLY {
+        return Some(vec![WIN_ONLY.to_string()]);
+    }
+    Hotkey::parse(s).map(|h| h.parts())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hotkey {
     pub mods: HOT_KEY_MODIFIERS,

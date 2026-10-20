@@ -12,7 +12,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 
 use crate::config::{Config, ThemeMode};
 use crate::gfx::{Gfx, Target, glyph, rect};
-use crate::hotkey::{Hotkey, bindable_key};
+use crate::hotkey::{Hotkey, bindable_key, display_parts};
 use crate::theme::Palette;
 use crate::{Fx, platform};
 
@@ -219,11 +219,11 @@ impl Settings {
         t.fill_round_a(field, 8.0, pal.text, 0.05);
         t.stroke_round(field, 8.0, if self.recording { pal.accent_ink } else { pal.border }, 1.0);
         if self.recording {
-            let msg = self.hotkey_error.unwrap_or("Press a shortcut…  Esc cancels");
+            let msg = self.hotkey_error.unwrap_or("Press a shortcut or tap Win…  Esc cancels");
             t.text(msg, &f.body, rect(PAD + 12.0, y, field.right - PAD - 20.0, 40.0), pal.muted);
-        } else if let Some(hk) = Hotkey::parse(&cfg.hotkey) {
+        } else if let Some(parts) = display_parts(&cfg.hotkey) {
             let mut x = PAD + 10.0;
-            for (i, part) in hk.parts().iter().enumerate() {
+            for (i, part) in parts.iter().enumerate() {
                 if i > 0 {
                     t.text("+", &f.body, rect(x, y, 14.0, 40.0), pal.muted);
                     x += 14.0;

@@ -8,6 +8,7 @@ mod overlay;
 mod platform;
 mod settings_ui;
 mod theme;
+mod winkey;
 mod worker;
 
 use std::cell::RefCell;
@@ -50,6 +51,8 @@ use crate::worker::{Req, Resp};
 pub const WM_APP_RESULTS: u32 = WM_APP + 1;
 const WM_APP_TRAY: u32 = WM_APP + 2;
 const WM_APP_SHOW: u32 = WM_APP + 3;
+/// A lone Windows-key tap (see `winkey`).
+const WM_APP_WINKEY: u32 = WM_APP + 4;
 const CARET_TIMER: usize = 1;
 const STATS_TIMER: usize = 2;
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
@@ -108,6 +111,14 @@ impl App {
 
     fn register_hotkey(&mut self) -> bool {
         Hotkey::unregister(self.overlay.hwnd);
+        if self.cfg.hotkey == hotkey::WIN_ONLY {
+            winkey::enable(self.overlay.hwnd, WM_APP_WINKEY);
+            return true;
+        }
+        // The keyboard hook stays only while it is needed.
+        if !self.settings.recording {
+            winkey::disable();
+        }
         Hotkey::parse(&self.cfg.hotkey).is_some_and(|h| h.register(self.overlay.hwnd))
     }
 
@@ -440,7 +451,11 @@ fn run_one(f: Fx) {
             });
         }
         Fx::SuspendHotkey => {
-            with_app(|a| Hotkey::unregister(a.overlay.hwnd));
+            with_app(|a| {
+                Hotkey::unregister(a.overlay.hwnd);
+                // Recording: catch a lone Win tap (and keep Start closed).
+                winkey::enable(a.overlay.hwnd, WM_APP_WINKEY);
+            });
         }
         Fx::ApplyHotkey => {
             with_app(|a| {
@@ -569,6 +584,11 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         }
         WM_HOTKEY => {
             fx.push(Fx::ToggleOverlay);
+            Some(LRESULT(0))
+        }
+        WM_APP_WINKEY => {
+            let recording = with_app(|a| std::mem::take(&mut a.settings.recording)).unwrap_or(false);
+            fx.push(if recording { Fx::SetHotkey(hotkey::WIN_ONLY.into()) } else { Fx::ToggleOverlay });
             Some(LRESULT(0))
         }
         WM_APP_RESULTS => {

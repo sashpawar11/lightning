@@ -45,7 +45,7 @@ The installer isn't code-signed yet, so Windows SmartScreen may say *"Windows pr
 
 | Key | Action |
 | --- | --- |
-| <kbd>Alt</kbd>+<kbd>Space</kbd> (configurable) | Show / hide |
+| <kbd>Alt</kbd>+<kbd>Space</kbd> (configurable; can also be a tap of <kbd>Win</kbd>) | Show / hide |
 | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Move selection |
 | <kbd>Enter</kbd> | Open |
 | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Reveal file in Explorer |
@@ -54,7 +54,10 @@ The installer isn't code-signed yet, so Windows SmartScreen may say *"Windows pr
 | <kbd>Ctrl</kbd>+<kbd>,</kbd> | Settings |
 | <kbd>Esc</kbd> | Hide (your query is kept, pre-selected) |
 
-Left-click the tray icon for settings, right-click for the menu.
+Left-click the tray icon for settings, right-click for the menu. To use the
+Windows key, click **Record** and tap <kbd>Win</kbd>: a tap opens Lightning
+instead of Start, while <kbd>Win</kbd>+<kbd>E</kbd> and other Windows shortcuts
+keep working.
 
 <br clear="right">
 
