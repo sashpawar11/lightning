@@ -35,8 +35,6 @@
 - **Looks native:** frosted-glass panel with adjustable strength, automatic light/dark theme, Work Sans typography, real app and file icons.
 - **Lives in the tray:** a small settings panel for hotkey, theme, glass, sources, start at sign-in and always-on-top.
 
-<img src="docs/settings.png" width="280" align="right" alt="Tray settings panel">
-
 ## Install
 
 1. Download **`Lightning-Setup-<version>.exe`** from the [latest release](https://github.com/sashpawar11/lightning/releases/latest).
@@ -63,7 +61,9 @@ Windows key, click **Record** and tap <kbd>Win</kbd>: a tap opens Lightning
 instead of Start, while <kbd>Win</kbd>+<kbd>E</kbd> and other Windows shortcuts
 keep working.
 
-<br clear="right">
+<p align="center">
+  <img src="docs/settings.png" width="280" alt="Tray settings panel">
+</p>
 
 ## Benchmarks
 
