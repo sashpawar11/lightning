@@ -53,6 +53,45 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Filename: "{app}\lightning.exe"; Description: "Launch Lightning (press Alt+Space)"; Flags: postinstall nowait skipifsilent
 
 [Code]
+var
+  // True when the user chose "Update now" for an older install: the option
+  // pages are skipped and the previous install's choices are reused.
+  QuickUpdate: Boolean;
+
+function InitializeSetup(): Boolean;
+var
+  Installed: String;
+  InstalledVer, NewVer: Int64;
+begin
+  Result := True;
+  if not RegQueryStringValue(HKEY_CURRENT_USER,
+      'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1',
+      'DisplayVersion', Installed) then
+    Exit;
+  if not (StrToVersion(Installed, InstalledVer) and StrToVersion('{#AppVersion}', NewVer)) then
+    Exit;
+  if ComparePackedVersion(InstalledVer, NewVer) >= 0 then
+    Exit;
+
+  case SuppressibleTaskDialogMsgBox(
+      'Update Lightning ' + Installed + ' to {#AppVersion}?',
+      'An older version of Lightning is installed on this PC. Updating keeps your settings and index.',
+      mbConfirmation, MB_YESNOCANCEL, [
+       '&Update now'#13#10'Replace it with {#AppVersion} using your current options.',
+       '&Choose options'#13#10'Go through setup to change startup and shortcut options.'],
+      0, IDYES) of
+    IDYES: QuickUpdate := True;
+    IDNO: QuickUpdate := False;
+  else
+    Result := False;
+  end;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := QuickUpdate and ((PageID = wpSelectTasks) or (PageID = wpReady));
+end;
+
 // Lightning lives in the tray, so make sure no copy is running while its
 // exe is replaced or removed.
 procedure StopLightning();
