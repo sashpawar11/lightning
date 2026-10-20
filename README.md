@@ -15,7 +15,6 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-141518?labelColor=141518&color=2A2C31"></a>
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-141518?labelColor=141518&color=2A2C31">
   <img alt="Rust" src="https://img.shields.io/badge/built%20with-Rust-141518?labelColor=141518&color=2A2C31">
-  <img alt="RAM" src="https://img.shields.io/badge/idle%20RAM-~45%20MB-141518?labelColor=141518&color=2A2C31">
 </p>
 
 <p align="center">
