@@ -1,0 +1,5 @@
+# AVX2 codegen: ~15-20% faster fuzzy matching. Remove to support pre-2013 CPUs
+# and low-end Atom/Celeron chips without AVX2.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
