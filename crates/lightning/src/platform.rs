@@ -17,7 +17,7 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, GetSystemMetrics, HICON, ICONINFO, SM_CXSMICON, SW_SHOWNORMAL,
 };
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::core::{HSTRING, PCSTR, PCWSTR, PSTR, w};
 
 pub fn open(target: &str) -> bool {
     if let Some(hex) = target.strip_prefix("pidl:") {
@@ -85,6 +85,92 @@ pub fn set_acrylic(hwnd: HWND) {
         };
         let _ = f(hwnd, &mut data);
     }
+}
+
+/// Runs `path` elevated (a UAC prompt). False if it was refused or failed.
+pub fn run_as_admin(path: &str, args: Option<&str>) -> bool {
+    let args = args.map(HSTRING::from);
+    let params = args.as_ref().map_or(PCWSTR::null(), |a| PCWSTR(a.as_ptr()));
+    let r = unsafe { ShellExecuteW(None, w!("runas"), &HSTRING::from(path), params, None, SW_SHOWNORMAL) };
+    r.0 as isize > 32
+}
+
+/// Files that can run elevated.
+pub fn is_executable(path: &str) -> bool {
+    const EXT: &[&str] = &["exe", "bat", "cmd", "com", "msi", "lnk"];
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| EXT.iter().any(|x| x.eq_ignore_ascii_case(e)))
+}
+
+/// A classic app's executable and shortcut arguments, read from its
+/// AppsFolder item's properties (cheap, unlike building its context menu).
+/// Packaged apps, and apps that are shell folders, have none.
+pub fn app_exe(target: &str) -> Option<(String, Option<String>)> {
+    use windows::Win32::Storage::EnhancedStorage::{PKEY_Link_Arguments, PKEY_Link_TargetParsingPath};
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{IShellItem2, SHCreateItemFromParsingName};
+    unsafe {
+        let item: IShellItem2 = SHCreateItemFromParsingName(&HSTRING::from(target), None).ok()?;
+        let get = |key| {
+            let p = item.GetString(key).ok()?;
+            let s = p.to_string().ok();
+            CoTaskMemFree(Some(p.0 as *const _));
+            s.filter(|s| !s.is_empty())
+        };
+        let exe = get(&PKEY_Link_TargetParsingPath).filter(|p| !p.starts_with("::"))?;
+        Some((exe, get(&PKEY_Link_Arguments)))
+    }
+}
+
+/// Packaged apps have no executable to elevate, so this invokes "Run as
+/// administrator" from the app's own shell menu, as the Start menu does.
+/// That handler is heavy, so it is loaded only here and unloaded after.
+pub fn run_as_admin_packaged(target: &str, owner: HWND) -> bool {
+    use windows::Win32::System::Com::CoFreeUnusedLibrariesEx;
+    use windows::Win32::UI::Shell::{
+        BHID_SFUIObject, CMF_NORMAL, CMINVOKECOMMANDINFO, GCS_VERBW, IContextMenu, IShellItem,
+        SHCreateItemFromParsingName,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemID};
+    let run = || unsafe {
+        let item: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(target), None).ok()?;
+        let cm: IContextMenu = item.BindToHandler(None, &BHID_SFUIObject).ok()?;
+        let menu = CreatePopupMenu().ok()?;
+        let mut cmd = None;
+        if cm.QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL).is_ok() {
+            for i in 0..GetMenuItemCount(Some(menu)) {
+                let id = GetMenuItemID(menu, i);
+                if id == 0 || id == u32::MAX {
+                    continue; // separator or submenu
+                }
+                let mut buf = [0u16; 64];
+                let ok = cm.GetCommandString((id - 1) as usize, GCS_VERBW, None, PSTR(buf.as_mut_ptr() as _), 64);
+                let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
+                if ok.is_ok() && String::from_utf16_lossy(&buf[..n]).eq_ignore_ascii_case("runas") {
+                    cmd = Some(id - 1);
+                    break;
+                }
+            }
+        }
+        let ok = cmd.is_some_and(|c| {
+            let info = CMINVOKECOMMANDINFO {
+                cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
+                hwnd: owner,
+                lpVerb: PCSTR(c as usize as *const u8), // MAKEINTRESOURCE
+                nShow: SW_SHOWNORMAL.0,
+                ..Default::default()
+            };
+            cm.InvokeCommand(&info).is_ok()
+        });
+        let _ = DestroyMenu(menu);
+        Some(ok)
+    };
+    let ok = run().unwrap_or(false);
+    // The handler is released by now, so its DLLs can unload.
+    unsafe { CoFreeUnusedLibrariesEx(0, None) };
+    ok
 }
 
 pub fn reveal(path: &str) {
