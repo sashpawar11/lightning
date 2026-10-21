@@ -75,6 +75,10 @@ pub enum Fx {
     HideSettings,
     ToggleSettings,
     Launch { hit: Hit, reveal: bool },
+    /// From the right-click menu: the app's executable and shortcut
+    /// arguments, or `None` for a packaged app.
+    RunAsAdmin { hit: Hit, exe: Option<(String, Option<String>)> },
+    OpenLocation { hit: Hit, path: String },
     /// Quick settings tile `i` switched to `on`.
     Quick(usize, bool),
     /// Resize the visible overlay to its content.
@@ -464,6 +468,22 @@ fn run_one(f: Fx) {
         Fx::Quick(i, on) => {
             with_app(|a| a.quick.send(quick::Req::Set(i, on)));
         }
+        Fx::RunAsAdmin { hit, exe } => {
+            let Some(hwnd) = with_app(|a| a.overlay.hwnd) else { return };
+            run_one(Fx::HideOverlay);
+            let ok = match exe {
+                Some((path, args)) => platform::run_as_admin(&path, args.as_deref()),
+                None => platform::run_as_admin_packaged(&hit.target, hwnd),
+            };
+            if ok {
+                with_app(|a| a.worker.send(Req::Launched(hit)));
+            }
+        }
+        Fx::OpenLocation { hit, path } => {
+            run_one(Fx::HideOverlay);
+            platform::reveal(&path);
+            with_app(|a| a.worker.send(Req::Launched(hit)));
+        }
         Fx::TrayMenu => tray_menu(),
         Fx::Quit => unsafe { PostQuitMessage(0) },
         Fx::ApplyTheme => {
@@ -606,6 +626,10 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         }
         WM_LBUTTONDOWN => {
             with_app(|a| a.overlay.on_click(lo(lp), hi(lp), &mut fx));
+            Some(LRESULT(0))
+        }
+        WM_RBUTTONUP => {
+            with_app(|a| a.overlay.on_right_click(lo(lp), hi(lp)));
             Some(LRESULT(0))
         }
         WM_MOUSEWHEEL => {

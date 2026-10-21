@@ -417,4 +417,6 @@ pub mod glyph {
     pub const DARK: &str = "\u{E708}";
     pub const LIGHT: &str = "\u{E706}";
     pub const BLUETOOTH: &str = "\u{E702}";
+    pub const ADMIN: &str = "\u{E7EF}";
+    pub const FOLDER: &str = "\u{E838}";
 }

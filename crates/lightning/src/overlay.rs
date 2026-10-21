@@ -8,7 +8,7 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 use windows::Win32::Graphics::Gdi::InvalidateRect;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT};
 
 use crate::gfx::{Gfx, Target, caret_x, glyph, rect};
 use crate::quick::{self, States};
@@ -35,6 +35,45 @@ const TILE_W: f32 = (W - 40.0 - 24.0) / 4.0;
 
 fn tile_rect(k: usize, y: f32) -> D2D_RECT_F {
     rect(20.0 + k as f32 * (TILE_W + 8.0), y, TILE_W, TILE_H)
+}
+
+/// Right-click menu entries, in order.
+const MENU_ITEMS: [(&str, &str); 2] = [(glyph::ADMIN, "Run as administrator"), (glyph::FOLDER, "Open file location")];
+const MENU_W: f32 = 208.0;
+const MENU_ITEM_H: f32 = 32.0;
+const MENU_PAD: f32 = 5.0;
+const MENU_H: f32 = MENU_PAD * 2.0 + MENU_ITEMS.len() as f32 * MENU_ITEM_H;
+
+/// The right-click menu, drawn inside the overlay so it costs no window.
+struct Menu {
+    hit: usize,
+    /// Top-left corner, DIPs.
+    x: f32,
+    y: f32,
+    /// Highlighted entry (mouse or arrow keys).
+    sel: Option<usize>,
+    enabled: [bool; 2],
+    /// The executable or file the entries act on; packaged apps have none.
+    path: Option<String>,
+    args: Option<String>,
+}
+
+impl Menu {
+    fn item_rect(&self, k: usize) -> D2D_RECT_F {
+        rect(self.x + MENU_PAD, self.y + MENU_PAD + k as f32 * MENU_ITEM_H, MENU_W - MENU_PAD * 2.0, MENU_ITEM_H)
+    }
+
+    fn contains(&self, x: f32, y: f32) -> bool {
+        (self.x..self.x + MENU_W).contains(&x) && (self.y..self.y + MENU_H).contains(&y)
+    }
+
+    fn item_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !self.contains(x, y) {
+            return None;
+        }
+        let k = ((y - self.y - MENU_PAD) / MENU_ITEM_H).floor();
+        (k >= 0.0 && (k as usize) < MENU_ITEMS.len() && self.enabled[k as usize]).then_some(k as usize)
+    }
 }
 
 /// Controls with a hover state that isn't the selection.
@@ -78,6 +117,7 @@ pub struct Overlay {
     hover: Option<Hover>,
     recents: (Vec<Hit>, Vec<Option<Arc<Icon>>>),
     last_mouse: (i32, i32),
+    menu: Option<Menu>,
 }
 
 impl Overlay {
@@ -106,6 +146,7 @@ impl Overlay {
             hover: None,
             recents: (Vec::new(), Vec::new()),
             last_mouse: (i32::MIN, i32::MIN),
+            menu: None,
         }
     }
 
@@ -132,6 +173,7 @@ impl Overlay {
         self.caret_on = true;
         self.hover = None;
         self.last_mouse = (i32::MIN, i32::MIN);
+        self.menu = None;
     }
 
     pub fn drop_target(&mut self) {
@@ -144,6 +186,12 @@ impl Overlay {
         self.scanning = resp.scanning;
         if resp.generation != self.generation {
             return;
+        }
+        // The menu stays only if its hit is still at the same index.
+        if let Some(m) = &self.menu
+            && resp.results.hits.get(m.hit).map(|h| &h.target) != self.hits.get(m.hit).map(|h| &h.target)
+        {
+            self.menu = None;
         }
         let same_query = self.results_query.as_deref() == Some(resp.results.query.as_str());
         self.elapsed_us = resp.results.elapsed_us;
@@ -203,6 +251,7 @@ impl Overlay {
         if ctrl_down() {
             return; // Ctrl+letter shortcuts are handled in on_key.
         }
+        self.close_menu(); // typing goes to the query
         if (0xD800..0xDC00).contains(&unit) {
             self.high_surrogate = Some(unit);
             return;
@@ -219,7 +268,40 @@ impl Overlay {
 
     pub fn on_key(&mut self, vk: u16, fx: &mut Vec<Fx>) -> bool {
         let ctrl = ctrl_down();
+        if let Some(m) = &mut self.menu {
+            match vk {
+                0x1B => self.close_menu(),
+                // Down/Up: the next enabled entry, wrapping.
+                0x28 | 0x26 => {
+                    let n = MENU_ITEMS.len();
+                    let (step, from) = if vk == 0x28 { (1, n - 1) } else { (n - 1, 0) };
+                    let mut k = m.sel.unwrap_or(from);
+                    for _ in 0..n {
+                        k = (k + step) % n;
+                        if m.enabled[k] {
+                            m.sel = Some(k);
+                            break;
+                        }
+                    }
+                    self.invalidate();
+                }
+                0x0D => {
+                    if let Some(k) = m.sel {
+                        self.menu_action(k, fx);
+                    }
+                }
+                // Anything else closes the menu and acts as usual.
+                _ => {
+                    self.close_menu();
+                    return self.on_key(vk, fx);
+                }
+            }
+            return true;
+        }
         match vk {
+            // Context-menu key or Shift+F10: the menu for the selection.
+            0x5D => self.open_menu_at_sel(),
+            0x79 if shift_down() => self.open_menu_at_sel(),
             // One press always closes; the query is kept and pre-selected
             // on the next show, so typing replaces it.
             0x1B => fx.push(Fx::HideOverlay),
@@ -392,6 +474,15 @@ impl Overlay {
             return; // The window appearing under a still cursor isn't a hover.
         }
         let s = 96.0 / self.dpi;
+        if let Some(m) = &mut self.menu {
+            // While the menu is open, only its entries track the mouse.
+            let sel = m.item_at(x as f32 * s, y as f32 * s);
+            if sel != m.sel {
+                m.sel = sel;
+                self.invalidate();
+            }
+            return;
+        }
         let hover = self.hover_at(x as f32 * s, y as f32 * s);
         if hover != self.hover {
             self.hover = hover;
@@ -407,6 +498,15 @@ impl Overlay {
 
     pub fn on_click(&mut self, x: i32, y: i32, fx: &mut Vec<Fx>) {
         let (x, y) = (x as f32 * 96.0 / self.dpi, y as f32 * 96.0 / self.dpi);
+        if let Some(m) = &self.menu {
+            // A click outside only dismisses the menu.
+            match m.item_at(x, y) {
+                Some(k) => self.menu_action(k, fx),
+                None if m.contains(x, y) => {}
+                None => self.close_menu(),
+            }
+            return;
+        }
         if let Some(i) = self.hit_at(x, y) {
             self.launch(i, ctrl_down(), fx);
             return;
@@ -423,6 +523,72 @@ impl Overlay {
             Some(Hover::Gear) => fx.push(Fx::ShowSettings),
             None => {}
         }
+    }
+
+    pub fn on_right_click(&mut self, x: i32, y: i32) {
+        let (x, y) = (x as f32 * 96.0 / self.dpi, y as f32 * 96.0 / self.dpi);
+        self.close_menu();
+        if let Some(i) = self.hit_at(x, y) {
+            self.sel = i;
+            self.open_menu(i, x, y, false);
+        }
+    }
+
+    // ----------------------------------------------------------------- menu
+
+    /// Opens the menu for hit `i` with its corner near (x, y), in DIPs.
+    fn open_menu(&mut self, i: usize, x: f32, y: f32, keyboard: bool) {
+        let hit = &self.hits[i];
+        // The file to elevate or reveal; packaged apps have none.
+        let (path, args) = match hit.kind {
+            Kind::File => (Some(hit.target.clone()), None),
+            Kind::App => platform::app_exe(&hit.target).map_or((None, None), |(p, a)| (Some(p), a)),
+            Kind::Setting => return,
+        };
+        // Packaged app ids are AUMIDs: `PackageFamilyName!AppId`.
+        let packaged = hit.kind == Kind::App && path.is_none() && hit.target.contains('!');
+        let enabled = [packaged || path.as_deref().is_some_and(platform::is_executable), path.is_some()];
+        // Kept inside the window: flipped above the point near the bottom.
+        let x = x.clamp(8.0, W - MENU_W - 8.0);
+        let y = if y + MENU_H > self.height() - 8.0 { (y - MENU_H).max(8.0) } else { y };
+        let sel = if keyboard { enabled.iter().position(|&e| e) } else { None };
+        self.menu = Some(Menu { hit: i, x, y, sel, enabled, path, args });
+        self.invalidate();
+    }
+
+    /// Context-menu key: the menu just below the selected row or tile.
+    fn open_menu_at_sel(&mut self) {
+        let at = self.layout().into_iter().find_map(|(y, h, item)| {
+            let y = LIST_Y + y - self.scroll;
+            match item {
+                Item::Row(i) if i == self.sel => Some((64.0, y + ROW_H)),
+                Item::Grid(start) if (start..start + COLS).contains(&self.sel) => {
+                    Some((20.0 + (self.sel - start) as f32 * CELL_W + 8.0, y + h - 4.0))
+                }
+                _ => None,
+            }
+        });
+        if let Some((x, y)) = at {
+            self.open_menu(self.sel, x, y, true);
+        }
+    }
+
+    fn close_menu(&mut self) {
+        if self.menu.take().is_some() {
+            self.invalidate();
+        }
+    }
+
+    fn menu_action(&mut self, k: usize, fx: &mut Vec<Fx>) {
+        let Some(m) = self.menu.take() else { return };
+        if !m.enabled[k] {
+            return;
+        }
+        let hit = self.hits[m.hit].clone();
+        fx.push(match (k, m.path) {
+            (0, exe) => Fx::RunAsAdmin { hit, exe: exe.map(|p| (p, m.args)) },
+            (_, path) => Fx::OpenLocation { hit, path: path.unwrap_or_default() },
+        });
     }
 
     /// Quick settings tile or footer gear under a point (DIPs).
@@ -452,6 +618,7 @@ impl Overlay {
     }
 
     pub fn on_wheel(&mut self, delta: i16) {
+        self.close_menu(); // it would float away from its row
         let max = (self.content_height() - self.list_h()).max(0.0);
         self.scroll = (self.scroll - delta as f32 / 120.0 * ROW_STEP).clamp(0.0, max);
         self.invalidate();
@@ -634,6 +801,24 @@ impl Overlay {
         let hw = gfx.text_width(hints, &f.small);
         t.text(hints, &f.small, rect(gear.left - 12.0 - hw, fy, hw + 2.0, FOOT_H), pal.muted);
 
+        if let Some(m) = &self.menu {
+            let r = rect(m.x, m.y, MENU_W, MENU_H);
+            // A soft drop shadow: two offset layers under an opaque panel.
+            t.fill_round_a(rect(m.x - 2.0, m.y + 2.0, MENU_W + 4.0, MENU_H + 6.0), 12.0, 0x000000, 0.10);
+            t.fill_round_a(rect(m.x - 1.0, m.y + 1.0, MENU_W + 2.0, MENU_H + 3.0), 11.0, 0x000000, 0.14);
+            t.fill_round(r, 10.0, pal.panel);
+            t.stroke_round_a(r, 10.0, pal.text, 0.12, 1.0);
+            for (k, (g, label)) in MENU_ITEMS.into_iter().enumerate() {
+                let ir = m.item_rect(k);
+                if m.sel == Some(k) {
+                    t.fill_round_a(ir, 6.0, pal.text, if pal.dark { 0.08 } else { 0.06 });
+                }
+                let ink = if m.enabled[k] { pal.text } else { pal.placeholder };
+                t.text(g, &f.icon14, rect(ir.left + 4.0, ir.top, 28.0, MENU_ITEM_H), ink);
+                t.text(label, &f.body, rect(ir.left + 36.0, ir.top, ir.right - ir.left - 40.0, MENU_ITEM_H), ink);
+            }
+        }
+
         if t.end() {
             self.target = Some(target);
         } else {
@@ -701,6 +886,10 @@ impl Overlay {
 
 fn ctrl_down() -> bool {
     unsafe { GetKeyState(VK_CONTROL.0 as i32) < 0 }
+}
+
+fn shift_down() -> bool {
+    unsafe { GetKeyState(VK_SHIFT.0 as i32) < 0 }
 }
 
 fn prev_boundary(s: &str, i: usize) -> usize {
