@@ -9,6 +9,7 @@ mod platform;
 mod quick;
 mod settings_ui;
 mod theme;
+mod update;
 mod winkey;
 mod worker;
 
@@ -38,7 +39,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NIN_BALLOONUSERCLICK, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
@@ -60,8 +62,14 @@ const WM_APP_WINKEY: u32 = WM_APP + 4;
 pub const WM_APP_QUICK: u32 = WM_APP + 5;
 /// Icons that followed a results message (see `worker`).
 pub const WM_APP_ICONS: u32 = WM_APP + 6;
+/// An update check finished (see `update`).
+const WM_APP_UPDATE: u32 = WM_APP + 7;
 const CARET_TIMER: usize = 1;
 const STATS_TIMER: usize = 2;
+const UPDATE_TIMER: usize = 3;
+/// First automatic update check after start, then one a day.
+const UPDATE_FIRST_MS: u32 = 2 * 60 * 1000;
+const UPDATE_EVERY_MS: u32 = 24 * 60 * 60 * 1000;
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 /// Side effects that may re-enter a window procedure (showing windows,
@@ -92,7 +100,15 @@ pub enum Fx {
     SuspendHotkey,
     ApplyHotkey,
     SetHotkey(String),
+    CheckUpdate { manual: bool },
+    /// Ask before installing the update found by a manual check.
+    OfferUpdate,
+    InstallUpdate,
+    Message(String),
 }
+
+/// What an update check posts back with `WM_APP_UPDATE`.
+type UpdateCheck = (bool, Result<Option<update::Update>, String>);
 
 struct App {
     gfx: Gfx,
@@ -103,6 +119,8 @@ struct App {
     overlay: Overlay,
     settings: Settings,
     tray_icon: HICON,
+    /// A newer release found by the last check.
+    update: Option<update::Update>,
 }
 
 thread_local! {
@@ -183,6 +201,9 @@ fn main() -> windows::core::Result<()> {
         let worker = worker::spawn(overlay_hwnd, config::data_dir(), cfg.sources());
         let tray_icon = platform::bolt_icon().unwrap_or_default();
         add_tray(overlay_hwnd, tray_icon);
+        if update::is_installed() {
+            SetTimer(Some(overlay_hwnd), UPDATE_TIMER, UPDATE_FIRST_MS, None);
+        }
 
         let app = App {
             gfx: Gfx::new()?,
@@ -193,6 +214,7 @@ fn main() -> windows::core::Result<()> {
             overlay: Overlay::new(overlay_hwnd),
             settings: Settings::new(settings_hwnd, &roots),
             tray_icon,
+            update: None,
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
 
@@ -290,6 +312,27 @@ fn add_tray(hwnd: HWND, icon: HICON) {
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &tray_data(hwnd, icon));
     }
+}
+
+/// A notification from the tray icon; clicking it sends NIN_BALLOONUSERCLICK.
+fn notify(hwnd: HWND, icon: HICON, title: &str, text: &str) {
+    let mut nid = tray_data(hwnd, icon);
+    nid.uFlags |= NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO;
+    for (dst, c) in nid.szInfoTitle.iter_mut().zip(title.encode_utf16().take(63)) {
+        *dst = c;
+    }
+    for (dst, c) in nid.szInfo.iter_mut().zip(text.encode_utf16().take(255)) {
+        *dst = c;
+    }
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+fn message_box(text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
+    use windows::core::HSTRING;
+    unsafe { MessageBoxW(None, &HSTRING::from(text), w!("Lightning"), style | MB_SETFOREGROUND | MB_TOPMOST) }
 }
 
 /// Monitor under the cursor: (work area, DPI).
@@ -493,6 +536,41 @@ fn run_one(f: Fx) {
             with_app(|a| a.worker.send(Req::Launched(hit)));
         }
         Fx::TrayMenu => tray_menu(),
+        Fx::CheckUpdate { manual } => {
+            let Some(hwnd) = with_app(|a| a.overlay.hwnd) else { return };
+            let hwnd = hwnd.0 as isize;
+            let _ = std::thread::Builder::new().name("update".into()).spawn(move || {
+                let check: Box<UpdateCheck> = Box::new((manual, update::check()));
+                let ptr = Box::into_raw(check);
+                unsafe {
+                    if PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_UPDATE, WPARAM(0), LPARAM(ptr as isize)).is_err() {
+                        drop(Box::from_raw(ptr));
+                    }
+                }
+            });
+        }
+        Fx::OfferUpdate => {
+            let Some(Some(v)) = with_app(|a| a.update.as_ref().map(|u| u.version.clone())) else { return };
+            let text = format!(
+                "Lightning {v} is available (you have {}).\n\nUpdate now? Lightning restarts by itself.",
+                env!("CARGO_PKG_VERSION")
+            );
+            if message_box(&text, MB_YESNO | MB_ICONINFORMATION) == IDYES {
+                run_one(Fx::InstallUpdate);
+            }
+        }
+        Fx::InstallUpdate => {
+            // Taken, so a second click can't start a second installer.
+            let Some(Some(u)) = with_app(|a| a.update.take()) else { return };
+            let _ = std::thread::Builder::new().name("update".into()).spawn(move || {
+                if let Err(e) = update::install(&u) {
+                    message_box(&format!("Couldn't update Lightning: {e}"), MB_OK | MB_ICONWARNING);
+                }
+            });
+        }
+        Fx::Message(text) => {
+            message_box(&text, MB_OK | MB_ICONINFORMATION);
+        }
         Fx::Quit => unsafe { PostQuitMessage(0) },
         Fx::ApplyTheme => {
             with_app(|a| a.apply_theme());
@@ -543,12 +621,24 @@ fn run_one(f: Fx) {
 }
 
 fn tray_menu() {
-    let Some(hwnd) = with_app(|a| a.overlay.hwnd) else { return };
+    let Some((hwnd, version)) = with_app(|a| (a.overlay.hwnd, a.update.as_ref().map(|u| u.version.clone())))
+    else {
+        return;
+    };
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let _ = AppendMenuW(menu, MF_STRING, 1, w!("Open Lightning"));
         let _ = AppendMenuW(menu, MF_STRING, 2, w!("Settings"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        match &version {
+            Some(v) => {
+                let label = windows::core::HSTRING::from(format!("Update to {v}"));
+                let _ = AppendMenuW(menu, MF_STRING, 4, &label);
+            }
+            None => {
+                let _ = AppendMenuW(menu, MF_STRING, 5, w!("Check for updates"));
+            }
+        }
         let _ = AppendMenuW(menu, MF_STRING, 3, w!("Quit"));
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -559,6 +649,8 @@ fn tray_menu() {
             1 => run_one(Fx::ShowOverlay),
             2 => run_one(Fx::ShowSettings),
             3 => run_one(Fx::Quit),
+            4 => run_one(Fx::InstallUpdate),
+            5 => run_one(Fx::CheckUpdate { manual: true }),
             _ => {}
         }
     }
@@ -660,6 +752,37 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             });
             Some(LRESULT(0))
         }
+        WM_TIMER if wp.0 == UPDATE_TIMER => {
+            unsafe {
+                SetTimer(Some(hwnd), UPDATE_TIMER, UPDATE_EVERY_MS, None);
+            }
+            fx.push(Fx::CheckUpdate { manual: false });
+            Some(LRESULT(0))
+        }
+        WM_APP_UPDATE => {
+            let (manual, result) = *unsafe { Box::from_raw(lp.0 as *mut UpdateCheck) };
+            match result {
+                Ok(Some(u)) => {
+                    let known = with_app(|a| a.update.as_ref().is_some_and(|k| k.version == u.version));
+                    if manual {
+                        fx.push(Fx::OfferUpdate);
+                    } else if known == Some(false)
+                        && let Some(icon) = with_app(|a| a.tray_icon)
+                    {
+                        let text = format!("Version {} is ready. Click to update.", u.version);
+                        notify(hwnd, icon, "Lightning update available", &text);
+                    }
+                    with_app(|a| a.update = Some(u));
+                }
+                Ok(None) if manual => fx.push(Fx::Message(format!(
+                    "Lightning {} is the latest version.",
+                    env!("CARGO_PKG_VERSION")
+                ))),
+                Err(e) if manual => fx.push(Fx::Message(format!("Couldn't check for updates: {e}"))),
+                _ => {}
+            }
+            Some(LRESULT(0))
+        }
         WM_HOTKEY => {
             fx.push(Fx::ToggleOverlay);
             Some(LRESULT(0))
@@ -696,6 +819,7 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             match (lp.0 & 0xFFFF) as u32 {
                 WM_LBUTTONUP => fx.push(Fx::ToggleSettings),
                 WM_RBUTTONUP => fx.push(Fx::TrayMenu),
+                NIN_BALLOONUSERCLICK => fx.push(Fx::InstallUpdate),
                 _ => {}
             }
             Some(LRESULT(0))
