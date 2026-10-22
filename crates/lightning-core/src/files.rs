@@ -6,8 +6,8 @@
 //! dominate both memory and results with files nobody launches by name.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use fff_search::file_picker::FilePicker;
@@ -66,9 +66,34 @@ impl Root {
     }
 }
 
-pub struct FileIndex {
+struct Roots {
     roots: Vec<Root>,
     parser: QueryParser<FileSearchConfig>,
+}
+
+/// A search key: (query, limit).
+type Key = (String, usize);
+
+/// State shared with the background searcher behind `search_timeout`.
+#[derive(Default)]
+struct Pending {
+    /// The search callers want now.
+    latest: Option<Key>,
+    /// Queued for the searcher.
+    want: Option<Key>,
+    running: Option<Key>,
+    done: Option<(Key, Vec<FileHit>)>,
+    /// File count as of the last recount, and whether one is wanted.
+    count: usize,
+    recount: bool,
+    closed: bool,
+}
+
+type Searcher = Arc<(Mutex<Pending>, Condvar)>;
+
+pub struct FileIndex {
+    roots: Arc<Roots>,
+    searcher: Searcher,
 }
 
 impl FileIndex {
@@ -111,11 +136,17 @@ impl FileIndex {
                 }
             }
         });
-        Self { roots, parser: QueryParser::default() }
+        let roots = Arc::new(Roots { roots, parser: QueryParser::default() });
+        let searcher = Searcher::default();
+        let _ = std::thread::Builder::new().name("file-search".into()).spawn({
+            let (roots, searcher) = (roots.clone(), searcher.clone());
+            move || run_searcher(&roots, &searcher)
+        });
+        Self { roots, searcher }
     }
 
     pub fn roots(&self) -> impl Iterator<Item = &Path> {
-        self.roots.iter().map(|r| r.base.as_path())
+        self.roots.roots.iter().map(|r| r.base.as_path())
     }
 
     /// Blocks until every root finished its initial scan (benches/tests).
@@ -132,7 +163,7 @@ impl FileIndex {
 
     /// True until every root has completed its initial scan.
     pub fn is_scanning(&self) -> bool {
-        self.roots.iter().any(|r| {
+        self.roots.roots.iter().any(|r| {
             if r.scanned.load(Ordering::Relaxed) {
                 return false;
             }
@@ -147,6 +178,7 @@ impl FileIndex {
     /// (root, files, still scanning) per root, for diagnostics.
     pub fn root_stats(&self) -> Vec<(&Path, usize, bool)> {
         self.roots
+            .roots
             .iter()
             .map(|r| {
                 let scanning = r.picker.read().ok().and_then(|g| g.as_ref().map(|p| p.is_scan_active()));
@@ -156,10 +188,85 @@ impl FileIndex {
     }
 
     pub fn file_count(&self) -> usize {
-        self.roots.iter().map(Root::file_count).sum()
+        self.roots.file_count()
+    }
+
+    /// `file_count` as of a moment ago, without waiting on a busy root.
+    pub fn file_count_cached(&self) -> usize {
+        let (lock, cv) = &*self.searcher;
+        let mut p = lock.lock().unwrap();
+        p.recount = true;
+        cv.notify_all();
+        p.count
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<FileHit> {
+        self.roots.search(query, limit)
+    }
+
+    /// `search`, but gives up after `wait`, returning `None`. A root is
+    /// locked while fff applies watcher changes, which on a busy disk can
+    /// take seconds; the search then finishes in the background and a later
+    /// call with the same query picks up its result.
+    pub fn search_timeout(&self, query: &str, limit: usize, wait: Duration) -> Option<Vec<FileHit>> {
+        let key = (query.to_owned(), limit);
+        let (lock, cv) = &*self.searcher;
+        let mut p = lock.lock().unwrap();
+        if p.latest.as_ref() != Some(&key) {
+            // A result for an earlier request of this query may be stale.
+            p.done = None;
+            p.latest = Some(key.clone());
+        }
+        let finished = |p: &Pending| p.done.as_ref().is_some_and(|d| d.0 == key);
+        if !finished(&p) && p.running.as_ref() != Some(&key) {
+            p.want = Some(key.clone());
+            cv.notify_all();
+        }
+        let (mut p, _) = cv.wait_timeout_while(p, wait, |p| !finished(p)).unwrap();
+        if finished(&p) { p.done.take().map(|d| d.1) } else { None }
+    }
+}
+
+impl Drop for FileIndex {
+    fn drop(&mut self) {
+        let (lock, cv) = &*self.searcher;
+        lock.lock().unwrap().closed = true;
+        cv.notify_all();
+    }
+}
+
+fn run_searcher(roots: &Roots, searcher: &Searcher) {
+    let (lock, cv) = &**searcher;
+    let mut p = lock.lock().unwrap();
+    loop {
+        p = cv.wait_while(p, |p| p.want.is_none() && !p.recount && !p.closed).unwrap();
+        if p.closed {
+            return;
+        }
+        if let Some(key) = p.want.take() {
+            p.running = Some(key.clone());
+            drop(p);
+            let hits = roots.search(&key.0, key.1);
+            p = lock.lock().unwrap();
+            p.running = None;
+            p.done = Some((key, hits));
+            cv.notify_all();
+        }
+        if std::mem::take(&mut p.recount) {
+            drop(p);
+            let count = roots.file_count();
+            p = lock.lock().unwrap();
+            p.count = count;
+        }
+    }
+}
+
+impl Roots {
+    fn file_count(&self) -> usize {
+        self.roots.iter().map(Root::file_count).sum()
+    }
+
+    fn search(&self, query: &str, limit: usize) -> Vec<FileHit> {
         let query = query.trim();
         if query.is_empty() || limit == 0 || self.roots.is_empty() {
             return Vec::new();
@@ -295,4 +402,43 @@ pub fn default_roots() -> Vec<PathBuf> {
 #[cfg(not(windows))]
 pub fn default_roots() -> Vec<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from).into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn busy_root_does_not_block_search() {
+        let dir = std::env::temp_dir().join(format!("lightning-files-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("quarterly_report.txt"), b"x").unwrap();
+        let idx = FileIndex::new(vec![dir.clone()]);
+        assert!(idx.wait_for_scan(Duration::from_secs(30)));
+
+        // What fff's watcher does while it applies a burst of changes.
+        let picker = idx.roots.roots[0].picker.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _guard = picker.write().unwrap();
+            locked_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        locked_rx.recv().unwrap();
+
+        let t = Instant::now();
+        assert!(idx.search_timeout("report", 6, Duration::from_millis(50)).is_none());
+        assert!(t.elapsed() < Duration::from_secs(1));
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let hits = idx.search_timeout("report", 6, Duration::from_secs(5)).unwrap();
+        assert_eq!(hits[0].name, "quarterly_report.txt");
+        // A new search for another query doesn't get the old result.
+        assert!(idx.search_timeout("nothing-here", 6, Duration::from_secs(5)).unwrap().is_empty());
+        drop(idx);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

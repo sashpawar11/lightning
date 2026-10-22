@@ -1,7 +1,7 @@
 //! Combines all sources into one ranked, grouped result list.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::apps::{App, Task};
 use crate::files::FileIndex;
@@ -12,6 +12,8 @@ pub const MAX_APPS: usize = 5;
 pub const MAX_FILES: usize = 6;
 pub const MAX_SETTINGS: usize = 5;
 const MAX_RECENT: usize = 12;
+/// How long a search waits for file results before answering without them.
+const FILE_WAIT: Duration = Duration::from_millis(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -54,6 +56,8 @@ pub struct Results {
     pub query: String,
     pub hits: Vec<Hit>,
     pub elapsed_us: u64,
+    /// File results weren't ready in time; searching again picks them up.
+    pub files_pending: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -130,6 +134,7 @@ impl Engine {
     pub fn search(&mut self, query: &str) -> Results {
         let start = Instant::now();
         let mut hits = Vec::with_capacity(MAX_APPS + MAX_FILES + MAX_SETTINGS);
+        let mut files_pending = false;
         self.matcher.set_query(query);
 
         if self.matcher.query_is_empty() {
@@ -145,16 +150,21 @@ impl Engine {
             let (settings, best_setting) =
                 if self.sources.settings { self.search_settings() } else { (Vec::new(), 0) };
             let files = match (&self.files, self.sources.files) {
-                (Some(f), true) => {
-                    let mut found = f.search(query, MAX_FILES * 2);
-                    // Files the user opened before float up (stable: fff's
-                    // order is kept among equals).
-                    found.sort_by_key(|h| {
-                        std::cmp::Reverse(self.launch_count(&h.path.to_string_lossy()))
-                    });
-                    found.truncate(MAX_FILES);
-                    found
-                }
+                (Some(f), true) => match f.search_timeout(query, MAX_FILES * 2, FILE_WAIT) {
+                    Some(mut found) => {
+                        // Files the user opened before float up (stable: fff's
+                        // order is kept among equals).
+                        found.sort_by_key(|h| {
+                            std::cmp::Reverse(self.launch_count(&h.path.to_string_lossy()))
+                        });
+                        found.truncate(MAX_FILES);
+                        found
+                    }
+                    None => {
+                        files_pending = true;
+                        Vec::new()
+                    }
+                },
                 _ => Vec::new(),
             };
             let files: Vec<Hit> = files
@@ -180,6 +190,7 @@ impl Engine {
             query: query.to_owned(),
             hits,
             elapsed_us: start.elapsed().as_micros() as u64,
+            files_pending,
         }
     }
 

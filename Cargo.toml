@@ -13,6 +13,10 @@ windows = "0.62.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# fff-search 0.11.0 with the watcher fixes in vendor/fff-search/LIGHTNING.md.
+[patch.crates-io]
+fff-search = { path = "vendor/fff-search" }
+
 [profile.release]
 opt-level = 3
 lto = "fat"
