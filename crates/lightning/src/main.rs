@@ -466,7 +466,15 @@ fn run_one(f: Fx) {
             }
         }
         Fx::Quick(i, on) => {
-            with_app(|a| a.quick.send(quick::Req::Set(i, on)));
+            with_app(|a| {
+                let _ = a.quick.send(quick::Req::Set(i, on));
+                // Auto already follows Windows; a fixed theme switches with the tile.
+                if i == quick::THEME && a.cfg.theme != config::ThemeMode::Auto {
+                    a.cfg.theme = if on { config::ThemeMode::Dark } else { config::ThemeMode::Light };
+                    a.cfg.save();
+                    a.apply_theme();
+                }
+            });
         }
         Fx::RunAsAdmin { hit, exe } => {
             let Some(hwnd) = with_app(|a| a.overlay.hwnd) else { return };
