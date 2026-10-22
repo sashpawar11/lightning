@@ -51,6 +51,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\lightning.exe"; Description: "Launch Lightning (press Alt+Space)"; Flags: postinstall nowait skipifsilent
+; In-app updates run setup silently after closing Lightning: start it again.
+Filename: "{app}\lightning.exe"; Flags: nowait; Check: WizardSilent
 
 [Code]
 var

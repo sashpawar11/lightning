@@ -67,7 +67,13 @@ $setup = Resolve-Path "dist\Lightning-Setup-$Version.exe"
 $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
 "$hash  Lightning-Setup-$Version.exe" | Set-Content -Encoding ascii "$setup.sha256"
 
+# In-app updates read this from the latest GitHub release (see update.rs).
+$url = "https://github.com/sashpawar11/lightning/releases/download/v$Version/Lightning-Setup-$Version.exe"
+@{ version = $Version; url = $url } | ConvertTo-Json -Compress | Set-Content -Encoding ascii 'dist\latest.json'
+
 Step "Done"
 $size = (Get-Item $setup).Length / 1MB
 Write-Host ("{0}  ({1:N1} MB)" -f $setup, $size) -ForegroundColor Green
 Write-Host "SHA-256 $hash"
+Write-Host "Upload with the installer so installed copies update:"
+Write-Host "  gh release create v$Version $setup $setup.sha256 dist\latest.json"

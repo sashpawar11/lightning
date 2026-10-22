@@ -140,12 +140,22 @@ fn run(
     engine.sources = sources;
     let mut last: Option<(u64, String)> = None;
     let mut apps_loaded = Instant::now();
+    // Generation whose results went out without files (still searching).
+    let mut files_pending: Option<u64> = None;
 
     loop {
         let scanning = engine.files().is_some_and(|f| f.is_scanning());
-        // While indexing, refresh the visible results as more files land.
-        let req = if scanning && last.is_some() {
-            match rx.recv_timeout(Duration::from_millis(400)) {
+        // While file results are late, keep asking until they land; while
+        // indexing, refresh the visible results as more files arrive.
+        let wait = if files_pending.is_some() {
+            Some(Duration::from_millis(20))
+        } else if scanning {
+            Some(Duration::from_millis(400))
+        } else {
+            None
+        };
+        let req = if let (Some(wait), Some(_)) = (wait, &last) {
+            match rx.recv_timeout(wait) {
                 Ok(r) => Some(r),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -170,12 +180,26 @@ fn run(
                 Req::Apps(list) => engine.set_apps(list),
             }
         }
+        // Pick up newly installed apps. Enumerating takes ~300 ms, so it
+        // runs on its own short-lived thread and searches never wait for it.
+        if refresh_apps && apps_loaded.elapsed() > Duration::from_secs(60) {
+            apps_loaded = Instant::now();
+            let tx = tx.clone();
+            let _ = std::thread::Builder::new()
+                .name("apps".into())
+                .spawn(move || tx.send(Req::Apps(apps::enumerate())));
+        }
         if let Some(q) = query {
             last = Some(q);
         }
         let Some((generation, q)) = &last else { continue };
 
         let results = engine.search(q);
+        let pending = results.files_pending;
+        if pending && files_pending == Some(*generation) {
+            continue; // these results are already on screen
+        }
+        files_pending = pending.then_some(*generation);
         let mut missing = Vec::new();
         let icon_list = {
             let cache = cache.lock().unwrap();
@@ -195,7 +219,7 @@ fn run(
         };
         let (file_count, scanning) = engine
             .files()
-            .map_or((0, false), |f| (f.file_count(), f.is_scanning()));
+            .map_or((0, false), |f| (f.file_count_cached(), f.is_scanning()));
         let resp = Box::new(Resp {
             generation: *generation,
             results,
@@ -206,15 +230,6 @@ fn run(
         post(hwnd, WM_APP_RESULTS, resp);
         if !missing.is_empty() {
             let _ = icon_tx.send(IconReq { generation: *generation, missing });
-        }
-        // Pick up newly installed apps. Enumerating takes ~300 ms, so it
-        // runs on its own short-lived thread and searches never wait for it.
-        if refresh_apps && apps_loaded.elapsed() > Duration::from_secs(60) {
-            apps_loaded = Instant::now();
-            let tx = tx.clone();
-            let _ = std::thread::Builder::new()
-                .name("apps".into())
-                .spawn(move || tx.send(Req::Apps(apps::enumerate())));
         }
     }
 }
