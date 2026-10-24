@@ -11,7 +11,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 
 use crate::config::{Config, ThemeMode};
-use crate::gfx::{Gfx, Target, glyph, rect};
+use crate::gfx::{Gfx, Target, rect};
+use crate::icon::glyph;
 use crate::hotkey::{Hotkey, bindable_key, display_parts};
 use crate::theme::Palette;
 use crate::{Fx, platform};
@@ -204,12 +205,12 @@ impl Settings {
 
         // Header
         t.fill_round(rect(PAD, 14.0, 26.0, 26.0), 7.0, pal.accent);
-        t.text(glyph::BOLT, &f.icon14, rect(PAD, 14.0, 26.0, 26.0), pal.on_accent);
+        t.icon(gfx, glyph::BOLT, 18.0, rect(PAD, 14.0, 26.0, 26.0), pal.on_accent);
         t.text("Lightning", &f.heading, rect(PAD + 36.0, 14.0, 200.0, 26.0), pal.text);
         // Minimize: hides the panel, like Esc or clicking away.
         let close = rect(W - PAD - 26.0, 14.0, 26.0, 26.0);
         t.fill_round_a(close, 7.0, pal.text, 0.06);
-        t.text(glyph::MINIMIZE, &f.icon14, close, pal.text);
+        t.icon(gfx, glyph::MINIMIZE, 18.0, close, pal.text);
         self.hits.push((close, Ctl::Close));
         let ver = concat!("v", env!("CARGO_PKG_VERSION"));
         let vw = gfx.text_width(ver, &f.small);

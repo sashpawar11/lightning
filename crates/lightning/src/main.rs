@@ -4,6 +4,7 @@ mod bolt;
 mod config;
 mod gfx;
 mod hotkey;
+mod icon;
 mod overlay;
 mod platform;
 mod quick;
