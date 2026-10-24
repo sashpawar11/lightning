@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use lightning_core::power::{self, Action};
 use lightning_core::{Hit, Kind};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
@@ -31,6 +32,27 @@ const TILE_H: f32 = 52.0;
 const COLS: usize = 6;
 const GRID_H: f32 = 80.0;
 const CELL_W: f32 = (W - 40.0) / COLS as f32;
+
+/// Power shortcut buttons: size, gap, and the widest a button gets.
+const PBTN_H: f32 = 44.0;
+const PBTN_GAP: f32 = 8.0;
+const PBTN_MAX_W: f32 = 112.0;
+
+fn power_rect(k: usize, n: usize, y: f32) -> D2D_RECT_F {
+    let w = ((W - 40.0 - PBTN_GAP * (n.max(1) - 1) as f32) / n.max(1) as f32).min(PBTN_MAX_W);
+    rect(20.0 + k as f32 * (w + PBTN_GAP), y, w, PBTN_H)
+}
+
+fn power_glyph(a: Action) -> Glyph {
+    match a {
+        Action::Shutdown => glyph::POWER,
+        Action::Restart => glyph::RESTART,
+        Action::Sleep => glyph::DARK,
+        Action::SignOut => glyph::SIGN_OUT,
+        Action::Lock => glyph::LOCK,
+        Action::Hibernate => glyph::HIBERNATE,
+    }
+}
 
 const TILE_W: f32 = (W - 40.0 - 24.0) / 4.0;
 
@@ -91,6 +113,8 @@ enum Item {
     /// A row of recent tiles, starting at this hit index.
     Grid(usize),
     Tiles,
+    /// Power shortcut buttons: first hit index and how many.
+    Power(usize, usize),
     Empty,
 }
 
@@ -119,6 +143,8 @@ pub struct Overlay {
     recents: (Vec<Hit>, Vec<Option<Arc<Icon>>>),
     last_mouse: (i32, i32),
     menu: Option<Menu>,
+    /// The power button waiting for its confirming second press.
+    armed: Option<Action>,
 }
 
 impl Overlay {
@@ -148,6 +174,7 @@ impl Overlay {
             recents: (Vec::new(), Vec::new()),
             last_mouse: (i32::MIN, i32::MIN),
             menu: None,
+            armed: None,
         }
     }
 
@@ -175,6 +202,7 @@ impl Overlay {
         self.hover = None;
         self.last_mouse = (i32::MIN, i32::MIN);
         self.menu = None;
+        self.armed = None;
     }
 
     pub fn drop_target(&mut self) {
@@ -207,6 +235,7 @@ impl Overlay {
         } else {
             self.sel = 0;
             self.scroll = 0.0;
+            self.armed = None;
         }
         // Drop bitmaps for icons no longer referenced.
         let live: Vec<usize> = self.icons.iter().flatten().map(|i| Arc::as_ptr(i) as usize).collect();
@@ -263,12 +292,17 @@ impl Overlay {
         };
         let s = String::from_utf16_lossy(&units);
         if s.chars().all(|c| !c.is_control()) {
+            self.armed = None; // Enter's own WM_CHAR must not cancel it
             self.insert(&s, fx);
         }
     }
 
     pub fn on_key(&mut self, vk: u16, fx: &mut Vec<Fx>) -> bool {
         let ctrl = ctrl_down();
+        // Only Enter (or a click) can confirm; any other key cancels.
+        if vk != 0x0D && self.armed.take().is_some() {
+            self.invalidate();
+        }
         if let Some(m) = &mut self.menu {
             match vk {
                 0x1B => self.close_menu(),
@@ -306,6 +340,16 @@ impl Overlay {
             // One press always closes; the query is kept and pre-selected
             // on the next show, so typing replaces it.
             0x1B => fx.push(Fx::HideOverlay),
+            0x09 if self.sel < self.power_count() => self.cycle_power(if shift_down() { -1 } else { 1 }),
+            0x27 if self.sel < self.power_count()
+                && self.caret == self.query.len()
+                && self.sel + 1 < self.power_count() =>
+            {
+                self.move_sel(1)
+            }
+            0x25 if self.sel > 0 && self.sel < self.power_count() && self.caret == self.query.len() => {
+                self.move_sel(-1)
+            }
             0x28 if self.idle() => self.move_grid(COLS as isize),
             0x26 if self.idle() => self.move_grid(-(COLS as isize)),
             0x27 if self.idle() => self.move_sel(1),
@@ -419,6 +463,7 @@ impl Overlay {
             let hit = match item {
                 Item::Row(i) => i == self.sel,
                 Item::Grid(start) => (start..start + COLS).contains(&self.sel),
+                Item::Power(start, n) => (start..start + n).contains(&self.sel),
                 _ => false,
             };
             if hit {
@@ -434,8 +479,28 @@ impl Overlay {
         }
     }
 
+    /// Power buttons lead the hits; how many there are.
+    fn power_count(&self) -> usize {
+        self.hits.iter().take_while(|h| h.kind == Kind::Power).count()
+    }
+
+    fn cycle_power(&mut self, d: isize) {
+        let n = self.power_count() as isize;
+        self.sel = (self.sel as isize + d).rem_euclid(n) as usize;
+        self.invalidate();
+    }
+
     fn launch(&mut self, i: usize, reveal: bool, fx: &mut Vec<Fx>) {
         if let Some(hit) = self.hits.get(i) {
+            if hit.kind == Kind::Power {
+                if let Some(a) = Action::from_target(&hit.target) {
+                    if power::activate(&mut self.armed, a) {
+                        fx.push(Fx::Power(a));
+                    }
+                    self.invalidate();
+                }
+                return;
+            }
             fx.push(Fx::Launch { hit: hit.clone(), reveal });
         }
     }
@@ -460,6 +525,12 @@ impl Overlay {
             Item::Grid(start) => {
                 let i = start + ((x - 20.0) / CELL_W).floor().clamp(0.0, COLS as f32 - 1.0) as usize;
                 ((20.0..W - 20.0).contains(&x) && i < self.hits.len()).then_some(i)
+            }
+            Item::Power(start, n) => {
+                (0..n).find(|&k| {
+                    let r = power_rect(k, n, 0.0);
+                    x >= r.left && x < r.right
+                }).map(|k| start + k)
             }
             _ => None,
         }
@@ -508,7 +579,11 @@ impl Overlay {
             }
             return;
         }
-        if let Some(i) = self.hit_at(x, y) {
+        let hit = self.hit_at(x, y);
+        if hit.is_none_or(|i| self.hits[i].kind != Kind::Power) && self.armed.take().is_some() {
+            self.invalidate();
+        }
+        if let Some(i) = hit {
             self.launch(i, ctrl_down(), fx);
             return;
         }
@@ -544,7 +619,7 @@ impl Overlay {
         let (path, args) = match hit.kind {
             Kind::File => (Some(hit.target.clone()), None),
             Kind::App => platform::app_exe(&hit.target).map_or((None, None), |(p, a)| (Some(p), a)),
-            Kind::Setting => return,
+            Kind::Setting | Kind::Power => return,
         };
         // Packaged app ids are AUMIDs: `PackageFamilyName!AppId`.
         let packaged = hit.kind == Kind::App && path.is_none() && hit.target.contains('!');
@@ -642,8 +717,13 @@ impl Overlay {
             }
         }
         for (i, h) in self.hits.iter().enumerate().filter(|_| !idle) {
+            // The buttons share one row.
+            if h.kind == Kind::Power && prev == Some(Kind::Power) {
+                continue;
+            }
             let label = if prev != Some(h.kind) {
                 Some(match h.kind {
+                    Kind::Power => "Power shortcuts",
                     Kind::App => "Applications",
                     Kind::File => "Files",
                     Kind::Setting => "Settings",
@@ -656,8 +736,14 @@ impl Overlay {
                 out.push((y, lh, Item::Label(l)));
                 y += lh;
             }
-            out.push((y, ROW_STEP, Item::Row(i)));
-            y += ROW_STEP;
+            if h.kind == Kind::Power {
+                let n = self.power_count();
+                out.push((y, PBTN_H + 8.0, Item::Power(i, n)));
+                y += PBTN_H + 8.0;
+            } else {
+                out.push((y, ROW_STEP, Item::Row(i)));
+                y += ROW_STEP;
+            }
             prev = Some(h.kind);
         }
         if idle {
@@ -774,6 +860,26 @@ impl Overlay {
                         t.text(status, &f.small, rect(tx, y + 27.0, tw - 56.0, 16.0), sub);
                     }
                 }
+                Item::Power(start, n) => {
+                    for k in 0..n {
+                        let r = power_rect(k, n, y);
+                        let Some(a) = Action::from_target(&self.hits[start + k].target) else { continue };
+                        let armed = self.armed == Some(a);
+                        let (ink, name) = if armed {
+                            t.fill_round(r, 10.0, pal.accent);
+                            (pal.on_accent, "Confirm")
+                        } else {
+                            let sel = start + k == self.sel;
+                            t.fill_round_a(r, 10.0, pal.text, if sel { 0.12 } else { 0.06 });
+                            if sel {
+                                t.stroke_round_a(r, 10.0, pal.accent, 0.8, 1.5);
+                            }
+                            (pal.text, self.hits[start + k].title.as_str())
+                        };
+                        t.icon(gfx, power_glyph(a), 20.0, rect(r.left + 4.0, y, 26.0, PBTN_H), ink);
+                        t.text(name, &f.small, rect(r.left + 31.0, y, r.right - r.left - 32.0, PBTN_H), ink);
+                    }
+                }
                 Item::Empty => {
                     let msg = if self.scanning { "No matches yet. Still indexing…" } else { "No matches. Try fewer letters." };
                     t.text(msg, &f.small_center, rect(0.0, y + 40.0, W, 20.0), pal.muted);
@@ -848,6 +954,7 @@ impl Overlay {
                 Kind::App => glyph::APPS,
                 Kind::File => glyph::PAGE,
                 Kind::Setting => glyph::SETTING,
+                Kind::Power => glyph::POWER,
             };
             t.fill_round_a(tile, 8.0, pal.text, 0.07);
             t.icon(gfx, g, 18.0, tile, pal.text);

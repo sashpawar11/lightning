@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use crate::apps::{App, Task};
 use crate::files::FileIndex;
 use crate::fuzzy::{Matcher, Prepared, Ranges, char_mask};
+use crate::power;
 use crate::settings::SETTINGS;
 
 pub const MAX_APPS: usize = 5;
@@ -20,6 +21,8 @@ pub enum Kind {
     App,
     File,
     Setting,
+    /// A power shortcut; never persisted to history.
+    Power,
 }
 
 impl Kind {
@@ -28,6 +31,7 @@ impl Kind {
             Kind::App => "app",
             Kind::File => "file",
             Kind::Setting => "setting",
+            Kind::Power => "power",
         }
     }
     fn from_tag(s: &str) -> Option<Self> {
@@ -35,6 +39,7 @@ impl Kind {
             "app" => Kind::App,
             "file" => Kind::File,
             "setting" => Kind::Setting,
+            "power" => Kind::Power,
             _ => return None,
         })
     }
@@ -65,6 +70,7 @@ pub struct Sources {
     pub apps: bool,
     pub files: bool,
     pub settings: bool,
+    pub power: bool,
 }
 
 struct Launch {
@@ -104,7 +110,7 @@ impl Engine {
             tasks: Vec::new(),
             prepared: SETTINGS.iter().map(|s| Prepared::new(s.title, s.keywords)).collect(),
             files,
-            sources: Sources { apps: true, files: true, settings: true },
+            sources: Sources { apps: true, files: true, settings: true, power: true },
             matcher: Matcher::default(),
             history,
             history_path,
@@ -182,6 +188,16 @@ impl Engine {
             // a weak trailing group goes last.
             let (lead, trail) =
                 if best_setting > best_app { (settings, apps) } else { (apps, settings) };
+            // Power buttons lead so the best match is pre-selected.
+            if self.sources.power {
+                hits.extend(power::matches(query).into_iter().map(|p| Hit {
+                    kind: Kind::Power,
+                    title: p.label.into(),
+                    subtitle: "Power shortcuts".into(),
+                    ranges: Vec::new(),
+                    target: p.action.target(),
+                }));
+            }
             hits.extend(lead);
             hits.extend(files);
             hits.extend(trail);
@@ -369,6 +385,17 @@ mod tests {
         assert!(r.hits.iter().any(|h| h.title == "Volume mixer"));
         let r = e.search("system volume");
         assert_eq!(r.hits[0].title, "Adjust system volume");
+    }
+
+    #[test]
+    fn power_buttons_lead_matching_queries_only() {
+        let mut e = engine();
+        let r = e.search("shut");
+        assert_eq!(r.hits[0].kind, Kind::Power);
+        assert_eq!(r.hits[0].title, "Shut down");
+        assert!(e.search("chrome").hits.iter().all(|h| h.kind != Kind::Power));
+        e.sources.power = false;
+        assert!(e.search("shut").hits.iter().all(|h| h.kind != Kind::Power));
     }
 
     #[test]

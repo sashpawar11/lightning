@@ -74,7 +74,7 @@ impl Settings {
     pub fn height(&self) -> f32 {
         let drives = self.drives.len().clamp(1, 4) as f32;
         54.0 + PAD + (16.0 + 8.0 + 40.0) + 18.0 + (16.0 + 8.0 + 40.0) + 18.0 + (22.0 + 28.0) + 18.0
-            + (22.0 + 5.0 * 36.0) + 18.0
+            + (22.0 + 6.0 * 36.0) + 18.0
             + (22.0 + drives * 38.0 + 16.0) + PAD + 40.0
     }
 
@@ -109,11 +109,12 @@ impl Settings {
                     0 => &mut cfg.search_apps,
                     1 => &mut cfg.search_files,
                     2 => &mut cfg.search_settings,
-                    3 => &mut cfg.launch_at_startup,
+                    3 => &mut cfg.search_power,
+                    4 => &mut cfg.launch_at_startup,
                     _ => &mut cfg.always_on_top,
                 };
                 *v = !*v;
-                if k == 3 {
+                if k == 4 {
                     platform::set_autostart(cfg.launch_at_startup);
                 }
                 cfg.save();
@@ -298,6 +299,7 @@ impl Settings {
             ("Installed apps", cfg.search_apps),
             ("Files & folders", cfg.search_files),
             ("Windows settings", cfg.search_settings),
+            ("Power shortcuts", cfg.search_power),
             ("Launch at startup", cfg.launch_at_startup),
             ("Always on top", cfg.always_on_top),
         ];

@@ -7,6 +7,7 @@ mod hotkey;
 mod icon;
 mod overlay;
 mod platform;
+mod power;
 mod quick;
 mod settings_ui;
 mod theme;
@@ -84,6 +85,8 @@ pub enum Fx {
     HideSettings,
     ToggleSettings,
     Launch { hit: Hit, reveal: bool },
+    /// A power shortcut button that is confirmed (or needs no confirmation).
+    Power(lightning_core::power::Action),
     /// From the right-click menu: the app's executable and shortcut
     /// arguments, or `None` for a packaged app.
     RunAsAdmin { hit: Hit, exe: Option<(String, Option<String>)> },
@@ -491,6 +494,10 @@ fn run_one(f: Fx) {
             if ok {
                 with_app(|a| a.worker.send(Req::Launched(hit)));
             }
+        }
+        Fx::Power(action) => {
+            run_one(Fx::HideOverlay);
+            power::run(action);
         }
         Fx::FitOverlay => {
             let Some((hwnd, h, dpi)) =
