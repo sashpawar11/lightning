@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### New
-- **Power shortcuts.** Type `shutdown`, `restart`, `sleep`, `sign out`, `lock`, `hibernate` (or `power`) and a row of buttons appears with the best match selected. `Enter`, a click, or Tab / arrow keys + `Enter` runs it. Shut down, Restart and Sign out ask for a second press (the button turns into **Confirm**; any other key or click cancels). They never force-close apps, so you can still save your work. Shut down and Restart don't opt in to installing Windows updates, but Windows may still finish updates it already staged. Can be turned off in settings.
+- **Power shortcuts.** Type `shutdown`, `restart`, `sleep`, `sign out`, `lock`, `hibernate` (or `power`) and a row of buttons appears with the best match selected. While you are still typing a keyword (`sta`, `pow`) the buttons wait below your apps and files, so Enter never puts the PC to sleep when you meant to open something. `Enter`, a click, or Tab / arrow keys + `Enter` runs it. Shut down, Restart and Sign out ask for a second press (the button turns into **Confirm**; any other key or click cancels). They never force-close apps, so you can still save your work. Shut down and Restart don't opt in to installing Windows updates, but Windows may still finish updates it already staged. Can be turned off in settings.
 
 ## 0.4.0 · 2026-10-22
 

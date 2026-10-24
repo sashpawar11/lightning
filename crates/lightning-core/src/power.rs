@@ -13,6 +13,8 @@ pub enum Action {
 
 pub struct PowerAction {
     pub action: Action,
+    /// Stable id used in `Hit::target`.
+    pub id: &'static str,
     pub label: &'static str,
     /// Lowercase phrases; the query must be a prefix of one.
     pub keywords: &'static [&'static str],
@@ -20,18 +22,24 @@ pub struct PowerAction {
     pub confirm: bool,
 }
 
-const fn a(action: Action, label: &'static str, keywords: &'static [&'static str], confirm: bool) -> PowerAction {
-    PowerAction { action, label, keywords, confirm }
+const fn a(
+    action: Action,
+    id: &'static str,
+    label: &'static str,
+    keywords: &'static [&'static str],
+    confirm: bool,
+) -> PowerAction {
+    PowerAction { action, id, label, keywords, confirm }
 }
 
 /// Table order is the display order. Every action also answers to "power".
 pub static ACTIONS: &[PowerAction] = &[
-    a(Action::Shutdown, "Shut down", &["power", "shutdown", "shut down", "power off", "poweroff", "turn off"], true),
-    a(Action::Restart, "Restart", &["power", "restart", "reboot"], true),
-    a(Action::Sleep, "Sleep", &["power", "sleep", "suspend", "standby"], false),
-    a(Action::SignOut, "Sign out", &["power", "sign out", "signout", "log off", "logoff", "log out", "logout"], true),
-    a(Action::Lock, "Lock", &["power", "lock"], false),
-    a(Action::Hibernate, "Hibernate", &["power", "hibernate"], false),
+    a(Action::Shutdown, "shutdown", "Shut down", &["power", "shutdown", "shut down", "power off", "poweroff", "turn off"], true),
+    a(Action::Restart, "restart", "Restart", &["power", "restart", "reboot"], true),
+    a(Action::Sleep, "sleep", "Sleep", &["power", "sleep", "suspend", "standby"], false),
+    a(Action::SignOut, "signout", "Sign out", &["power", "sign out", "signout", "log off", "logoff", "log out", "logout"], true),
+    a(Action::Lock, "lock", "Lock", &["power", "lock"], false),
+    a(Action::Hibernate, "hibernate", "Hibernate", &["power", "hibernate"], false),
 ];
 
 /// Shorter queries are too ambiguous to show buttons for.
@@ -44,12 +52,12 @@ impl Action {
 
     /// The `Hit::target` for this action.
     pub fn target(self) -> String {
-        format!("power:{}", self.info().keywords[1])
+        format!("power:{}", self.info().id)
     }
 
     pub fn from_target(t: &str) -> Option<Self> {
         let key = t.strip_prefix("power:")?;
-        ACTIONS.iter().find(|p| p.keywords[1] == key).map(|p| p.action)
+        ACTIONS.iter().find(|p| p.id == key).map(|p| p.action)
     }
 }
 
@@ -72,6 +80,13 @@ pub fn matches(query: &str) -> Vec<&'static PowerAction> {
     // Stable, so table order breaks ties.
     found.sort_by_key(|(r, _)| std::cmp::Reverse(*r));
     found.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Whether `query` is a whole keyword, as opposed to the start of one. Only
+/// then is the intent clear enough for the buttons to lead and be pre-selected.
+pub fn is_exact(query: &str) -> bool {
+    let q = query.trim();
+    ACTIONS.iter().any(|p| p.keywords.iter().any(|k| k.eq_ignore_ascii_case(q)))
 }
 
 /// A press on `action`'s button. Returns whether to run it now: actions
@@ -118,6 +133,16 @@ mod tests {
     fn ordinary_queries_match_nothing() {
         for q in ["", "s", "sh", "re", "chrome", "calc", "sound", "lo", "locker", "power x", "shutdownn"] {
             assert!(matches(q).is_empty(), "{q}");
+        }
+    }
+
+    #[test]
+    fn only_whole_keywords_are_exact() {
+        for q in ["power", "Lock", " sleep ", "shut down", "reboot"] {
+            assert!(is_exact(q), "{q}");
+        }
+        for q in ["pow", "sta", "shut", "loc", "sign", "chrome", ""] {
+            assert!(!is_exact(q), "{q}");
         }
     }
 

@@ -297,9 +297,13 @@ impl Overlay {
         }
     }
 
-    pub fn on_key(&mut self, vk: u16, fx: &mut Vec<Fx>) -> bool {
+    pub fn on_key(&mut self, vk: u16, repeat: bool, fx: &mut Vec<Fx>) -> bool {
         let ctrl = ctrl_down();
-        // Only Enter (or a click) can confirm; any other key cancels.
+        // Only a fresh Enter (or a click) can confirm; any other key cancels.
+        // Holding Enter must not count as the second press.
+        if vk == 0x0D && repeat && self.armed.is_some() {
+            return true;
+        }
         if vk != 0x0D && self.armed.take().is_some() {
             self.invalidate();
         }
@@ -328,11 +332,12 @@ impl Overlay {
                 // Anything else closes the menu and acts as usual.
                 _ => {
                     self.close_menu();
-                    return self.on_key(vk, fx);
+                    return self.on_key(vk, repeat, fx);
                 }
             }
             return true;
         }
+        let power = self.power_span();
         match vk {
             // Context-menu key or Shift+F10: the menu for the selection.
             0x5D => self.open_menu_at_sel(),
@@ -340,14 +345,11 @@ impl Overlay {
             // One press always closes; the query is kept and pre-selected
             // on the next show, so typing replaces it.
             0x1B => fx.push(Fx::HideOverlay),
-            0x09 if self.sel < self.power_count() => self.cycle_power(if shift_down() { -1 } else { 1 }),
-            0x27 if self.sel < self.power_count()
-                && self.caret == self.query.len()
-                && self.sel + 1 < self.power_count() =>
-            {
+            0x09 if power.contains(&self.sel) => self.cycle_power(power, if shift_down() { -1 } else { 1 }),
+            0x27 if power.contains(&self.sel) && self.caret == self.query.len() && self.sel + 1 < power.end => {
                 self.move_sel(1)
             }
-            0x25 if self.sel > 0 && self.sel < self.power_count() && self.caret == self.query.len() => {
+            0x25 if power.contains(&self.sel) && self.sel > power.start && self.caret == self.query.len() => {
                 self.move_sel(-1)
             }
             0x28 if self.idle() => self.move_grid(COLS as isize),
@@ -479,14 +481,15 @@ impl Overlay {
         }
     }
 
-    /// Power buttons lead the hits; how many there are.
-    fn power_count(&self) -> usize {
-        self.hits.iter().take_while(|h| h.kind == Kind::Power).count()
+    /// Hit indices of the power buttons, which are always contiguous.
+    fn power_span(&self) -> std::ops::Range<usize> {
+        let start = self.hits.iter().position(|h| h.kind == Kind::Power).unwrap_or(0);
+        start..start + self.hits[start..].iter().take_while(|h| h.kind == Kind::Power).count()
     }
 
-    fn cycle_power(&mut self, d: isize) {
-        let n = self.power_count() as isize;
-        self.sel = (self.sel as isize + d).rem_euclid(n) as usize;
+    fn cycle_power(&mut self, span: std::ops::Range<usize>, d: isize) {
+        let n = span.len() as isize;
+        self.sel = span.start + ((self.sel - span.start) as isize + d).rem_euclid(n) as usize;
         self.invalidate();
     }
 
@@ -737,7 +740,7 @@ impl Overlay {
                 y += lh;
             }
             if h.kind == Kind::Power {
-                let n = self.power_count();
+                let n = self.power_span().len();
                 out.push((y, PBTN_H + 8.0, Item::Power(i, n)));
                 y += PBTN_H + 8.0;
             } else {
