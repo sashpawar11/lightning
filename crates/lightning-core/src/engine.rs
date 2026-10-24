@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::apps::{App, Task};
+use crate::calc;
 use crate::files::FileIndex;
 use crate::fuzzy::{Matcher, Prepared, Ranges, char_mask};
 use crate::settings::SETTINGS;
@@ -20,6 +21,8 @@ pub enum Kind {
     App,
     File,
     Setting,
+    /// A calculator answer; never persisted or ranked.
+    Calc,
 }
 
 impl Kind {
@@ -28,6 +31,7 @@ impl Kind {
             Kind::App => "app",
             Kind::File => "file",
             Kind::Setting => "setting",
+            Kind::Calc => "calc",
         }
     }
     fn from_tag(s: &str) -> Option<Self> {
@@ -58,6 +62,9 @@ pub struct Results {
     pub elapsed_us: u64,
     /// File results weren't ready in time; searching again picks them up.
     pub files_pending: bool,
+    /// The calculator took the whole query: nothing else was searched, and
+    /// no hits means "not an answer yet", not "no matches".
+    pub math: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -65,6 +72,7 @@ pub struct Sources {
     pub apps: bool,
     pub files: bool,
     pub settings: bool,
+    pub calc: bool,
 }
 
 struct Launch {
@@ -104,7 +112,7 @@ impl Engine {
             tasks: Vec::new(),
             prepared: SETTINGS.iter().map(|s| Prepared::new(s.title, s.keywords)).collect(),
             files,
-            sources: Sources { apps: true, files: true, settings: true },
+            sources: Sources { apps: true, files: true, settings: true, calc: true },
             matcher: Matcher::default(),
             history,
             history_path,
@@ -133,6 +141,16 @@ impl Engine {
 
     pub fn search(&mut self, query: &str) -> Results {
         let start = Instant::now();
+        // Arithmetic is the whole answer: no other source is searched.
+        if self.sources.calc && calc::is_math(query) {
+            return Results {
+                query: query.to_owned(),
+                hits: calc::eval_partial(query).map(|a| calc_hit(query, a)).into_iter().collect(),
+                elapsed_us: start.elapsed().as_micros() as u64,
+                files_pending: false,
+                math: true,
+            };
+        }
         let mut hits = Vec::with_capacity(MAX_APPS + MAX_FILES + MAX_SETTINGS);
         let mut files_pending = false;
         self.matcher.set_query(query);
@@ -146,6 +164,11 @@ impl Engine {
                 target: l.target.clone(),
             }));
         } else {
+            if self.sources.calc
+                && let Some(answer) = calc::eval(query)
+            {
+                hits.push(calc_hit(query, answer));
+            }
             let (apps, best_app) = if self.sources.apps { self.search_apps() } else { (Vec::new(), 0) };
             let (settings, best_setting) =
                 if self.sources.settings { self.search_settings() } else { (Vec::new(), 0) };
@@ -191,6 +214,7 @@ impl Engine {
             hits,
             elapsed_us: start.elapsed().as_micros() as u64,
             files_pending,
+            math: false,
         }
     }
 
@@ -268,6 +292,9 @@ impl Engine {
 
     /// Call after the user opened `hit`; feeds ranking and the recent list.
     pub fn record_launch(&mut self, hit: &Hit) {
+        if hit.kind == Kind::Calc {
+            return;
+        }
         let count = match self.history.iter().position(|l| l.target == hit.target) {
             Some(i) => self.history.remove(i).count + 1,
             None => 1,
@@ -286,6 +313,16 @@ impl Engine {
         if let Some(p) = &self.history_path {
             let _ = std::fs::write(p, format_history(&self.history));
         }
+    }
+}
+
+fn calc_hit(query: &str, answer: String) -> Hit {
+    Hit {
+        kind: Kind::Calc,
+        subtitle: format!("{} =", query.trim()),
+        ranges: Vec::new(),
+        target: answer.clone(),
+        title: answer,
     }
 }
 
@@ -385,6 +422,27 @@ mod tests {
         e.record_launch(&hit);
         let r = e.search("");
         assert_eq!(r.hits[0].title, "Spotify");
+    }
+
+    #[test]
+    fn calculator_leads_and_stays_out_of_history() {
+        let mut e = engine();
+        let r = e.search("5+2");
+        assert_eq!((r.hits[0].kind, r.hits[0].title.as_str(), r.hits[0].subtitle.as_str()), (Kind::Calc, "7", "5+2 ="));
+        for q in ["7zip", "2024"] {
+            assert!(e.search(q).hits.iter().all(|h| h.kind != Kind::Calc), "{q}");
+        }
+        // Math mode: only the answer, provisional while unfinished, nothing if it can't be one.
+        let r = e.search("355+");
+        assert_eq!((r.hits.len(), r.hits[0].title.as_str(), r.hits[0].subtitle.as_str(), r.files_pending), (1, "355", "355+ =", false));
+        let r = e.search("5/0");
+        assert!(r.hits.is_empty() && r.math);
+        assert!(!e.search("7zip").math);
+        let hit = e.search("5+2").hits[0].clone();
+        e.record_launch(&hit);
+        assert!(e.search("").hits.is_empty());
+        e.sources.calc = false;
+        assert!(e.search("5+2").hits.iter().all(|h| h.kind != Kind::Calc));
     }
 
     #[test]

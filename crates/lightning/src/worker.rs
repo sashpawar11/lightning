@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use lightning_core::files::{FileIndex, default_roots};
-use lightning_core::{Engine, Hit, Kind, Results, Sources, apps};
+use lightning_core::{Engine, Hit, Kind, Results, Sources, apps, calc};
 use windows::Win32::Foundation::{HWND, LPARAM, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits,
@@ -149,7 +149,7 @@ fn run(
         // indexing, refresh the visible results as more files arrive.
         let wait = if files_pending.is_some() {
             Some(Duration::from_millis(20))
-        } else if scanning {
+        } else if scanning && !last.as_ref().is_some_and(|(_, q)| engine.sources.calc && calc::is_math(q)) {
             Some(Duration::from_millis(400))
         } else {
             None
@@ -237,7 +237,7 @@ fn run(
 /// Files share one icon per extension, except types whose icon is per file.
 fn icon_key(h: &Hit) -> Option<String> {
     match h.kind {
-        Kind::Setting => None,
+        Kind::Setting | Kind::Calc => None,
         Kind::App => Some(h.target.clone()),
         Kind::File => {
             let ext = std::path::Path::new(&h.target)

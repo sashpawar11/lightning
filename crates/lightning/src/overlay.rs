@@ -108,6 +108,8 @@ pub struct Overlay {
     icons: Vec<Option<Arc<Icon>>>,
     bitmaps: HashMap<usize, ID2D1Bitmap>,
     results_query: Option<String>,
+    /// The calculator owns the current results (see `Results::math`).
+    math: bool,
     sel: usize,
     scroll: f32,
     pub elapsed_us: u64,
@@ -137,6 +139,7 @@ impl Overlay {
             icons: Vec::new(),
             bitmaps: HashMap::new(),
             results_query: None,
+            math: false,
             sel: 0,
             scroll: 0.0,
             elapsed_us: 0,
@@ -169,6 +172,7 @@ impl Overlay {
         // The last recents, so the window opens at its final size.
         (self.hits, self.icons) = self.recents.clone();
         self.results_query = Some(String::new());
+        self.math = false;
         self.sel = 0;
         self.scroll = 0.0;
         self.caret_on = true;
@@ -197,6 +201,7 @@ impl Overlay {
         let same_query = self.results_query.as_deref() == Some(resp.results.query.as_str());
         self.elapsed_us = resp.results.elapsed_us;
         self.hits = resp.results.hits;
+        self.math = resp.results.math;
         self.icons = resp.icons;
         self.results_query = Some(resp.results.query);
         if self.results_query.as_deref() == Some("") {
@@ -544,7 +549,7 @@ impl Overlay {
         let (path, args) = match hit.kind {
             Kind::File => (Some(hit.target.clone()), None),
             Kind::App => platform::app_exe(&hit.target).map_or((None, None), |(p, a)| (Some(p), a)),
-            Kind::Setting => return,
+            Kind::Setting | Kind::Calc => return,
         };
         // Packaged app ids are AUMIDs: `PackageFamilyName!AppId`.
         let packaged = hit.kind == Kind::App && path.is_none() && hit.target.contains('!');
@@ -643,11 +648,12 @@ impl Overlay {
         }
         for (i, h) in self.hits.iter().enumerate().filter(|_| !idle) {
             let label = if prev != Some(h.kind) {
-                Some(match h.kind {
-                    Kind::App => "Applications",
-                    Kind::File => "Files",
-                    Kind::Setting => "Settings",
-                })
+                match h.kind {
+                    Kind::Calc => None,
+                    Kind::App => Some("Applications"),
+                    Kind::File => Some("Files"),
+                    Kind::Setting => Some("Settings"),
+                }
             } else {
                 None
             };
@@ -665,7 +671,7 @@ impl Overlay {
             out.push((y, lh, Item::Label("Quick settings")));
             y += lh;
             out.push((y, TILE_H, Item::Tiles));
-        } else if self.hits.is_empty() && self.results_query.as_deref() == Some(self.query.as_str()) {
+        } else if self.hits.is_empty() && !self.math && self.results_query.as_deref() == Some(self.query.as_str()) {
             out.push((y, 120.0, Item::Empty));
         }
         out
@@ -676,7 +682,13 @@ impl Overlay {
     }
 
     fn list_h(&self) -> f32 {
-        self.content_height().clamp(MIN_LIST_H, MAX_LIST_H)
+        // A calculator answer (or none yet) needs no filler below it.
+        let min = if self.answer_only() { 0.0 } else { MIN_LIST_H };
+        self.content_height().clamp(min, MAX_LIST_H)
+    }
+
+    fn answer_only(&self) -> bool {
+        self.math && !self.idle()
     }
 
     /// Window height (DIPs) that fits the current content.
@@ -798,7 +810,13 @@ impl Overlay {
         }
         let ink = if self.hover == Some(Hover::Gear) { pal.text } else { pal.muted };
         t.icon(gfx, glyph::SETTING, 18.0, gear, ink);
-        let hints = if idle { "Esc Close" } else { "Ctrl+Enter Reveal     Esc Close" };
+        let hints = if idle {
+            "Esc Close"
+        } else if self.answer_only() {
+            if self.hits.is_empty() { "Esc Close" } else { "Ctrl+C Copy     Esc Close" }
+        } else {
+            "Ctrl+Enter Reveal     Esc Close"
+        };
         let hw = gfx.text_width(hints, &f.small);
         t.text(hints, &f.small, rect(gear.left - 12.0 - hw, fy, hw + 2.0, FOOT_H), pal.muted);
 
@@ -847,7 +865,7 @@ impl Overlay {
             let g = match self.hits[i].kind {
                 Kind::App => glyph::APPS,
                 Kind::File => glyph::PAGE,
-                Kind::Setting => glyph::SETTING,
+                Kind::Setting | Kind::Calc => glyph::SETTING,
             };
             t.fill_round_a(tile, 8.0, pal.text, 0.07);
             t.icon(gfx, g, 18.0, tile, pal.text);
@@ -867,6 +885,23 @@ impl Overlay {
     fn paint_row(&mut self, gfx: &Gfx, t: &Target, pal: &Palette, i: usize, y: f32) {
         let f = &gfx.fonts;
         let selected = i == self.sel;
+        let hit = &self.hits[i];
+        if hit.kind == Kind::Calc {
+            // The answer: accent-tinted, larger, no icon.
+            let r = rect(10.0, y, W - 20.0, ROW_H);
+            t.fill_round_a(r, 10.0, pal.accent, pal.match_tint);
+            t.stroke_round_a(r, 10.0, pal.accent_ink, if selected { 0.5 } else { 0.25 }, 1.0);
+            let tw = W - 40.0 - 90.0;
+            t.text(&hit.title, &f.input, rect(24.0, y + 2.0, tw, 28.0), pal.text);
+            t.text(&hit.subtitle, &f.small, rect(24.0, y + 29.0, tw, 16.0), pal.muted);
+            if selected {
+                let cw = gfx.text_width("Copy", &f.small) + 16.0;
+                let r = rect(W - 22.0 - cw, y + 14.0, cw, 20.0);
+                t.fill_round_a(r, 6.0, pal.text, 0.08);
+                t.text("Copy", &f.small_center, r, pal.muted);
+            }
+            return;
+        }
         if selected {
             t.fill_round_a(rect(10.0, y, W - 20.0, ROW_H), 10.0, pal.text, if pal.dark { 0.08 } else { 0.06 });
         }

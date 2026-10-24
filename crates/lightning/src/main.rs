@@ -482,6 +482,10 @@ fn run_one(f: Fx) {
         }
         Fx::Launch { hit, reveal } => {
             run_one(Fx::HideOverlay);
+            if hit.kind == Kind::Calc {
+                with_app(|a| platform::copy_text(a.overlay.hwnd, &hit.target));
+                return;
+            }
             let ok = if reveal && hit.kind == Kind::File {
                 platform::reveal(&hit.target);
                 true
