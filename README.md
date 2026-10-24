@@ -100,6 +100,7 @@ Measured on an AMD Ryzen 7 7700X, release build. Every change is checked against
 - **DWM acrylic** for the glass effect, composited by Windows at no cost to the app.
 - **Shell APIs**: `AppsFolder` for installed apps, the *All Tasks* folder for Control Panel, `ms-settings:` URIs for Settings.
 - **Work Sans** typeface, embedded (SIL OFL 1.1).
+- **Fluent UI System Icons** as embedded vector paths (MIT), so icons render the same on Windows 10 and 11.
 - **Criterion** for benchmarks, **Inno Setup** for the installer.
 
 ## Build from source
@@ -198,4 +199,5 @@ directly, and show each one's current state.
 ## License
 
 [MIT](LICENSE). The embedded Work Sans font is licensed separately under the
-[SIL Open Font License 1.1](crates/lightning/assets/OFL.txt).
+[SIL Open Font License 1.1](crates/lightning/assets/OFL.txt). The embedded Fluent UI
+System Icons are MIT-licensed by Microsoft ([notice](crates/lightning/assets/FLUENT-ICONS-LICENSE.txt)).

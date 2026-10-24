@@ -10,7 +10,8 @@ use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT};
 
-use crate::gfx::{Gfx, Target, caret_x, glyph, rect};
+use crate::gfx::{Gfx, Target, caret_x, rect};
+use crate::icon::{Glyph, glyph};
 use crate::quick::{self, States};
 use crate::theme::Palette;
 use crate::worker::{Icon, Icons, Resp};
@@ -38,7 +39,7 @@ fn tile_rect(k: usize, y: f32) -> D2D_RECT_F {
 }
 
 /// Right-click menu entries, in order.
-const MENU_ITEMS: [(&str, &str); 2] = [(glyph::ADMIN, "Run as administrator"), (glyph::FOLDER, "Open file location")];
+const MENU_ITEMS: [(Glyph, &str); 2] = [(glyph::ADMIN, "Run as administrator"), (glyph::FOLDER, "Open file location")];
 const MENU_W: f32 = 208.0;
 const MENU_ITEM_H: f32 = 32.0;
 const MENU_PAD: f32 = 5.0;
@@ -699,7 +700,7 @@ impl Overlay {
         t.fill(rect(0.0, 0.0, W * frac, 2.0), pal.accent);
 
         // Header
-        t.text(glyph::BOLT, &f.icon20, rect(14.0, 17.0, 30.0, 30.0), pal.accent_ink);
+        t.icon(gfx, glyph::BOLT, 24.0, rect(14.0, 17.0, 30.0, 30.0), pal.accent_ink);
         let idle = self.query.trim().is_empty();
         let badge = if idle {
             hotkey.replace('+', " ")
@@ -767,7 +768,7 @@ impl Overlay {
                             t.fill_round_a(r, 10.0, pal.text, 0.03);
                             (pal.muted, pal.muted)
                         };
-                        t.text(g, &f.icon18, rect(r.left + 8.0, y, 36.0, TILE_H), ink);
+                        t.icon(gfx, g, 20.0, rect(r.left + 8.0, y, 36.0, TILE_H), ink);
                         let tx = r.left + 48.0;
                         t.text(name, &f.title, rect(tx, y + 8.0, tw - 56.0, 19.0), ink);
                         t.text(status, &f.small, rect(tx, y + 27.0, tw - 56.0, 16.0), sub);
@@ -796,7 +797,7 @@ impl Overlay {
             t.fill_round_a(gear, 6.0, pal.text, 0.08);
         }
         let ink = if self.hover == Some(Hover::Gear) { pal.text } else { pal.muted };
-        t.text(glyph::SETTING, &f.icon14, gear, ink);
+        t.icon(gfx, glyph::SETTING, 18.0, gear, ink);
         let hints = if idle { "Esc Close" } else { "Ctrl+Enter Reveal     Esc Close" };
         let hw = gfx.text_width(hints, &f.small);
         t.text(hints, &f.small, rect(gear.left - 12.0 - hw, fy, hw + 2.0, FOOT_H), pal.muted);
@@ -814,7 +815,7 @@ impl Overlay {
                     t.fill_round_a(ir, 6.0, pal.text, if pal.dark { 0.08 } else { 0.06 });
                 }
                 let ink = if m.enabled[k] { pal.text } else { pal.placeholder };
-                t.text(g, &f.icon14, rect(ir.left + 4.0, ir.top, 28.0, MENU_ITEM_H), ink);
+                t.icon(gfx, g, 18.0, rect(ir.left + 4.0, ir.top, 28.0, MENU_ITEM_H), ink);
                 t.text(label, &f.body, rect(ir.left + 36.0, ir.top, ir.right - ir.left - 40.0, MENU_ITEM_H), ink);
             }
         }
@@ -849,7 +850,7 @@ impl Overlay {
                 Kind::Setting => glyph::SETTING,
             };
             t.fill_round_a(tile, 8.0, pal.text, 0.07);
-            t.text(g, &gfx.fonts.icon14, tile, pal.text);
+            t.icon(gfx, g, 18.0, tile, pal.text);
         }
     }
 

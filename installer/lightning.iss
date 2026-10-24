@@ -40,6 +40,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "lightning.exe"; Flags: ignoreversion
 Source: "..\crates\lightning\assets\OFL.txt"; DestDir: "{app}"; DestName: "WorkSans-OFL.txt"; Flags: ignoreversion
+Source: "..\crates\lightning\assets\FLUENT-ICONS-LICENSE.txt"; DestDir: "{app}"; DestName: "FluentIcons-LICENSE.txt"; Flags: ignoreversion
 
 [Icons]
 Name: "{userprograms}\Lightning"; Filename: "{app}\lightning.exe"
