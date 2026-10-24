@@ -7,6 +7,7 @@ mod hotkey;
 mod icon;
 mod overlay;
 mod platform;
+mod power;
 mod quick;
 mod settings_ui;
 mod theme;
@@ -84,6 +85,8 @@ pub enum Fx {
     HideSettings,
     ToggleSettings,
     Launch { hit: Hit, reveal: bool },
+    /// A power shortcut button that is confirmed (or needs no confirmation).
+    Power(lightning_core::power::Action),
     /// From the right-click menu: the app's executable and shortcut
     /// arguments, or `None` for a packaged app.
     RunAsAdmin { hit: Hit, exe: Option<(String, Option<String>)> },
@@ -496,6 +499,10 @@ fn run_one(f: Fx) {
                 with_app(|a| a.worker.send(Req::Launched(hit)));
             }
         }
+        Fx::Power(action) => {
+            run_one(Fx::HideOverlay);
+            power::run(action);
+        }
         Fx::FitOverlay => {
             let Some((hwnd, h, dpi)) =
                 with_app(|a| a.overlay.visible.then(|| (a.overlay.hwnd, a.overlay.height(), a.overlay.dpi))).flatten()
@@ -704,7 +711,7 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             });
             Some(LRESULT(0))
         }
-        WM_KEYDOWN | WM_SYSKEYDOWN => with_app(|a| a.overlay.on_key(wp.0 as u16, &mut fx))
+        WM_KEYDOWN | WM_SYSKEYDOWN => with_app(|a| a.overlay.on_key(wp.0 as u16, lp.0 & (1 << 30) != 0, &mut fx))
             .filter(|&h| h)
             .map(|_| LRESULT(0)),
         WM_CHAR => {

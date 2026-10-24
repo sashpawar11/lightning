@@ -106,6 +106,15 @@ fn bench_calc(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_power(c: &mut Criterion) {
+    let mut g = c.benchmark_group("power");
+    // "chrome" is the rejection cost every ordinary query pays.
+    for q in ["chrome", "visual studio", "s", "shut", "power"] {
+        g.bench_function(q, |b| b.iter(|| lightning_core::power::matches(black_box(q))));
+    }
+    g.finish();
+}
+
 fn bench_files(c: &mut Criterion) {
     let root = corpus();
     let index = FileIndex::new(vec![root]);
@@ -135,5 +144,5 @@ fn bench_index_build(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_fuzzy, bench_engine_no_files, bench_calc, bench_files, bench_index_build);
+criterion_group!(benches, bench_fuzzy, bench_engine_no_files, bench_calc, bench_power, bench_files, bench_index_build);
 criterion_main!(benches);

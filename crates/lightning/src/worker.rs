@@ -237,7 +237,7 @@ fn run(
 /// Files share one icon per extension, except types whose icon is per file.
 fn icon_key(h: &Hit) -> Option<String> {
     match h.kind {
-        Kind::Setting | Kind::Calc => None,
+        Kind::Setting | Kind::Calc | Kind::Power => None,
         Kind::App => Some(h.target.clone()),
         Kind::File => {
             let ext = std::path::Path::new(&h.target)

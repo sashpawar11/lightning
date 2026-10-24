@@ -7,6 +7,7 @@ use crate::apps::{App, Task};
 use crate::calc;
 use crate::files::FileIndex;
 use crate::fuzzy::{Matcher, Prepared, Ranges, char_mask};
+use crate::power;
 use crate::settings::SETTINGS;
 
 pub const MAX_APPS: usize = 5;
@@ -23,6 +24,8 @@ pub enum Kind {
     Setting,
     /// A calculator answer; never persisted or ranked.
     Calc,
+    /// A power shortcut; never persisted to history.
+    Power,
 }
 
 impl Kind {
@@ -32,6 +35,7 @@ impl Kind {
             Kind::File => "file",
             Kind::Setting => "setting",
             Kind::Calc => "calc",
+            Kind::Power => "power",
         }
     }
     fn from_tag(s: &str) -> Option<Self> {
@@ -73,6 +77,7 @@ pub struct Sources {
     pub files: bool,
     pub settings: bool,
     pub calc: bool,
+    pub power: bool,
 }
 
 struct Launch {
@@ -112,7 +117,7 @@ impl Engine {
             tasks: Vec::new(),
             prepared: SETTINGS.iter().map(|s| Prepared::new(s.title, s.keywords)).collect(),
             files,
-            sources: Sources { apps: true, files: true, settings: true, calc: true },
+            sources: Sources { apps: true, files: true, settings: true, calc: true, power: true },
             matcher: Matcher::default(),
             history,
             history_path,
@@ -205,9 +210,32 @@ impl Engine {
             // a weak trailing group goes last.
             let (lead, trail) =
                 if best_setting > best_app { (settings, apps) } else { (apps, settings) };
+            // A whole keyword ("lock") puts the buttons first, pre-selected.
+            // The start of one ("sta", "pow") could be an app, so they go last.
+            let buttons: Vec<Hit> = if self.sources.power {
+                power::matches(query)
+                    .into_iter()
+                    .map(|p| Hit {
+                        kind: Kind::Power,
+                        title: p.label.into(),
+                        subtitle: "Power shortcuts".into(),
+                        ranges: Vec::new(),
+                        target: p.action.target(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let lead_buttons = !buttons.is_empty() && power::is_exact(query);
+            if lead_buttons {
+                hits.extend(buttons.iter().cloned());
+            }
             hits.extend(lead);
             hits.extend(files);
             hits.extend(trail);
+            if !buttons.is_empty() && !lead_buttons {
+                hits.extend(buttons);
+            }
         }
         Results {
             query: query.to_owned(),
@@ -406,6 +434,28 @@ mod tests {
         assert!(r.hits.iter().any(|h| h.title == "Volume mixer"));
         let r = e.search("system volume");
         assert_eq!(r.hits[0].title, "Adjust system volume");
+    }
+
+    #[test]
+    fn power_buttons_lead_matching_queries_only() {
+        let mut e = engine();
+        let r = e.search("shut down");
+        assert_eq!(r.hits[0].kind, Kind::Power);
+        assert_eq!(r.hits[0].title, "Shut down");
+        // A prefix still offers the button, after the real results.
+        let r = e.search("shut");
+        assert_eq!(r.hits.last().map(|h| h.title.as_str()), Some("Shut down"));
+        // The start of a keyword never outranks a real result.
+        let r = e.search("spot");
+        assert_eq!(r.hits[0].title, "Spotify");
+        let r = e.search("pow");
+        assert_ne!(r.hits[0].kind, Kind::Power);
+        assert!(r.hits.iter().any(|h| h.kind == Kind::Power));
+        assert_eq!(e.search("power").hits[0].kind, Kind::Power);
+        assert_eq!(e.search("lock").hits[0].title, "Lock");
+        assert!(e.search("chrome").hits.iter().all(|h| h.kind != Kind::Power));
+        e.sources.power = false;
+        assert!(e.search("shut").hits.iter().all(|h| h.kind != Kind::Power));
     }
 
     #[test]
