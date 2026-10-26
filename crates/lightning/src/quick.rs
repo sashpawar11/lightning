@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, w};
 
 use crate::WM_APP_QUICK;
-use crate::gfx::glyph;
+use crate::icon::{Glyph, glyph};
 
 /// Per tile: `None` while unknown or when the device has no such radio.
 /// Order: Wi-Fi, Bluetooth, sound, theme (`true` = dark).
@@ -28,7 +28,7 @@ pub type States = [Option<bool>; 4];
 pub const THEME: usize = 3;
 
 /// Tile `k` as (glyph, name, status line).
-pub fn describe(k: usize, state: Option<bool>) -> (&'static str, &'static str, &'static str) {
+pub fn describe(k: usize, state: Option<bool>) -> (Glyph, &'static str, &'static str) {
     let on_off = match state {
         Some(true) => "On",
         Some(false) => "Off",

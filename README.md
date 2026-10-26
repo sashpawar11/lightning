@@ -31,6 +31,7 @@
 - **Everything in one box:** installed apps (classic and Store), files on every fixed drive, Windows Settings pages and ~200 Control Panel tasks ("edit environment variables", "adjust system volume").
 - **Fast:** apps and settings answer in microseconds, files in milliseconds across ~200k files, all on a background thread so typing never stutters.
 - **Forgiving:** word-aware fuzzy matching (`vsc` → Visual Studio Code) and typo tolerance (`volumne control` → Volume mixer). Things you open often rank first.
+- **Calculator:** type `5+2` or `sqrt(16)^2` and the answer is the first result; <kbd>Enter</kbd> copies it.
 - **Light on memory:** ~45 MB idle including the full file index; no GPU device in the process.
 - **Looks native:** frosted-glass panel with adjustable strength, automatic light/dark theme, Work Sans typography, real app and file icons.
 - **Lives in the tray:** a small settings panel for hotkey, theme, glass, sources, start at sign-in and always-on-top.
@@ -100,6 +101,7 @@ Measured on an AMD Ryzen 7 7700X, release build. Every change is checked against
 - **DWM acrylic** for the glass effect, composited by Windows at no cost to the app.
 - **Shell APIs**: `AppsFolder` for installed apps, the *All Tasks* folder for Control Panel, `ms-settings:` URIs for Settings.
 - **Work Sans** typeface, embedded (SIL OFL 1.1).
+- **Fluent UI System Icons** as embedded vector paths (MIT), so icons render the same on Windows 10 and 11.
 - **Criterion** for benchmarks, **Inno Setup** for the installer.
 
 ## Build from source
@@ -198,4 +200,5 @@ directly, and show each one's current state.
 ## License
 
 [MIT](LICENSE). The embedded Work Sans font is licensed separately under the
-[SIL Open Font License 1.1](crates/lightning/assets/OFL.txt).
+[SIL Open Font License 1.1](crates/lightning/assets/OFL.txt). The embedded Fluent UI
+System Icons are MIT-licensed by Microsoft ([notice](crates/lightning/assets/FLUENT-ICONS-LICENSE.txt)).

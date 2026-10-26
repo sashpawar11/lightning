@@ -1,7 +1,7 @@
 //! Thin Direct2D / DirectWrite layer. Everything is drawn in DIPs; the render
 //! target's DPI maps DIPs to pixels.
 
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{E_INVALIDARG, HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC, CreateDIBSection,
     DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HBITMAP, HDC, HGDIOBJ, ReleaseDC, SRCCOPY,
@@ -13,8 +13,9 @@ use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::core::{Interface, Result, w};
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
+use crate::icon::{self, Glyph, Seg};
 use crate::theme::Rgb;
 
 pub fn col(rgb: Rgb) -> D2D1_COLOR_F {
@@ -54,15 +55,14 @@ pub struct Fonts {
     pub small_center: IDWriteTextFormat,
     pub label: IDWriteTextFormat,
     pub heading: IDWriteTextFormat,
-    pub icon20: IDWriteTextFormat,
-    pub icon18: IDWriteTextFormat,
-    pub icon14: IDWriteTextFormat,
 }
 
 pub struct Gfx {
     pub d2d: ID2D1Factory,
     pub dw: IDWriteFactory,
     pub fonts: Fonts,
+    /// One geometry per [`icon::PATHS`] entry, built once.
+    icons: Vec<ID2D1PathGeometry>,
 }
 
 impl Gfx {
@@ -100,7 +100,6 @@ impl Gfx {
                 f.SetTrimming(&trimming, &sign)?;
                 Ok(f)
             };
-            let icons = w!("Segoe Fluent Icons");
             let lead = DWRITE_TEXT_ALIGNMENT_LEADING;
             let center = DWRITE_TEXT_ALIGNMENT_CENTER;
             let fonts = Fonts {
@@ -111,11 +110,9 @@ impl Gfx {
                 small_center: fmt(ui, 12.0, DWRITE_FONT_WEIGHT_NORMAL, center)?,
                 label: fmt(ui, 11.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, lead)?,
                 heading: fmt(ui, 14.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, lead)?,
-                icon20: fmt(icons, 20.0, DWRITE_FONT_WEIGHT_NORMAL, center)?,
-                icon18: fmt(icons, 17.0, DWRITE_FONT_WEIGHT_NORMAL, center)?,
-                icon14: fmt(icons, 14.0, DWRITE_FONT_WEIGHT_NORMAL, center)?,
             };
-            Ok(Self { d2d, dw, fonts })
+            let icons = icon::PATHS.iter().map(|d| icon_geometry(&d2d, d)).collect::<Result<_>>()?;
+            Ok(Self { d2d, dw, fonts, icons })
         }
     }
 
@@ -131,6 +128,62 @@ impl Gfx {
                 Ok(m.widthIncludingTrailingWhitespace)
             })
             .unwrap_or(0.0)
+    }
+}
+
+/// Builds an icon's path data (20-unit box) into a filled geometry.
+fn icon_geometry(d2d: &ID2D1Factory, d: &str) -> Result<ID2D1PathGeometry> {
+    let segs = icon::parse(d).ok_or_else(|| windows::core::Error::from(E_INVALIDARG))?;
+    let pt = |(x, y): icon::Pt| Vector2 { X: x, Y: y };
+    unsafe {
+        let geo = d2d.CreatePathGeometry()?;
+        let sink = geo.Open()?;
+        // SVG's default fill rule is nonzero.
+        sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+        let (mut open, mut start) = (false, (0.0, 0.0));
+        for s in segs {
+            if let Seg::Move(p) = s {
+                if open {
+                    sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                }
+                start = p;
+                sink.BeginFigure(pt(p), D2D1_FIGURE_BEGIN_FILLED);
+                open = true;
+                continue;
+            }
+            if let Seg::Close = s {
+                if open {
+                    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                    open = false;
+                }
+                continue;
+            }
+            // Drawing after a close continues from the subpath's start.
+            if !open {
+                sink.BeginFigure(pt(start), D2D1_FIGURE_BEGIN_FILLED);
+                open = true;
+            }
+            match s {
+                Seg::Line(p) => sink.AddLine(pt(p)),
+                Seg::Cubic(a, b, e) => {
+                    sink.AddBezier(&D2D1_BEZIER_SEGMENT { point1: pt(a), point2: pt(b), point3: pt(e) })
+                }
+                Seg::Quad(a, e) => sink.AddQuadraticBezier(&D2D1_QUADRATIC_BEZIER_SEGMENT { point1: pt(a), point2: pt(e) }),
+                Seg::Arc(e, (rx, ry), rot, large, sweep) => sink.AddArc(&D2D1_ARC_SEGMENT {
+                    point: pt(e),
+                    size: D2D_SIZE_F { width: rx, height: ry },
+                    rotationAngle: rot,
+                    sweepDirection: if sweep { D2D1_SWEEP_DIRECTION_CLOCKWISE } else { D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE },
+                    arcSize: if large { D2D1_ARC_SIZE_LARGE } else { D2D1_ARC_SIZE_SMALL },
+                }),
+                Seg::Move(_) | Seg::Close => unreachable!(),
+            }
+        }
+        if open {
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+        }
+        sink.Close()?;
+        Ok(geo)
     }
 }
 
@@ -293,6 +346,19 @@ impl Target {
         }
     }
 
+    /// Draws icon `g` with its 20-unit box scaled to `size` DIPs, centered in `r`.
+    pub fn icon(&self, gfx: &Gfx, g: Glyph, size: f32, r: D2D_RECT_F, c: Rgb) {
+        let Some(geo) = gfx.icons.get(g.0) else { return };
+        let s = size / 20.0;
+        let (x, y) = ((r.left + r.right - size) / 2.0, (r.top + r.bottom - size) / 2.0);
+        let m = Matrix3x2 { M11: s, M12: 0.0, M21: 0.0, M22: s, M31: x, M32: y };
+        unsafe {
+            self.rt.SetTransform(&m);
+            self.rt.FillGeometry(geo, self.b(c), None);
+            self.rt.SetTransform(&Matrix3x2::identity());
+        }
+    }
+
     /// Text with byte `ranges` marked by a soft tint behind the glyphs.
     pub fn text_hl(
         &self,
@@ -402,21 +468,4 @@ pub fn caret_x(gfx: &Gfx, s: &str, fmt: &IDWriteTextFormat, pos16: u32) -> f32 {
         let _ = l.HitTestTextPosition(pos16, false, &mut x, &mut y, &mut m);
     }
     x
-}
-
-/// Segoe Fluent Icons code points.
-pub mod glyph {
-    pub const BOLT: &str = "\u{E945}";
-    pub const APPS: &str = "\u{E71D}";
-    pub const PAGE: &str = "\u{E7C3}";
-    pub const SETTING: &str = "\u{E713}";
-    pub const MINIMIZE: &str = "\u{E921}";
-    pub const WIFI: &str = "\u{E701}";
-    pub const VOLUME: &str = "\u{E767}";
-    pub const MUTE: &str = "\u{E74F}";
-    pub const DARK: &str = "\u{E708}";
-    pub const LIGHT: &str = "\u{E706}";
-    pub const BLUETOOTH: &str = "\u{E702}";
-    pub const ADMIN: &str = "\u{E7EF}";
-    pub const FOLDER: &str = "\u{E838}";
 }
