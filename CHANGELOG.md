@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **No more constant disk reads in the background.** After indexing a drive, and again after every rescan, Lightning read every file under 10 MB from start to end, gigabytes per pass, which also caused CPU and memory spikes. It now only lists file names, so once indexing finishes the disk stays quiet.
+
 ## 0.4.0 · 2026-10-22
 
 ### New
