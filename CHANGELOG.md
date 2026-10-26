@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### New
+- **Calculator.** Type a calculation like `5+2`, `(1,250*3)/4` or `sqrt(16)^2` and the answer appears as the first result. **Enter** copies it and closes Lightning; **Ctrl+C** copies it and keeps the overlay open. It understands `+ - * / % ^`, `×` `÷`, parentheses, `pi`, `e` and `sqrt abs sin cos tan ln log round floor ceil`. Plain numbers and app names (`2024`, `7zip`) are never treated as math.
+- **Percentages in the calculator.** `20% of 150`, `300% of 2000`, `200 + 10%` (adds 10% of 200) and `50%` all work. `10 % 3` is still a remainder.
+- **Calculations are instant and quiet.** While you type a calculation made of numbers and operators, Lightning shows only the answer (a running one for unfinished input like `355+`) and stops searching files, so the list no longer flickers. Dates and names like `2024-10-24` are still searched as files.
+- **Power shortcuts.** Type `shutdown`, `restart`, `sleep`, `sign out`, `lock`, `hibernate` (or `power`) and a row of buttons appears with the best match selected. While you are still typing a keyword (`sta`, `pow`) the buttons wait below your apps and files, so Enter never puts the PC to sleep when you meant to open something. `Enter`, a click, or Tab / arrow keys + `Enter` runs it. Shut down, Restart and Sign out ask for a second press (the button turns into **Confirm**; any other key or click cancels). They never force-close apps, so you can still save your work. Shut down and Restart don't opt in to installing Windows updates, but Windows may still finish updates it already staged.
+
 ### Fixed
 - **No more constant disk reads in the background.** After indexing a drive, and again after every rescan, Lightning read every file under 10 MB from start to end, gigabytes per pass, which also caused CPU and memory spikes. It now only lists file names, so once indexing finishes the disk stays quiet.
 

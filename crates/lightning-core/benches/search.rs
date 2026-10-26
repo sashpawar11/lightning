@@ -94,6 +94,27 @@ fn bench_engine_no_files(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_calc(c: &mut Criterion) {
+    let mut g = c.benchmark_group("calc");
+    g.bench_function("eval", |b| b.iter(|| lightning_core::calc::eval(black_box("(1,250 + 3.5) * 2 / sqrt(16) ^ 2"))));
+    // What every ordinary query pays: a word, and a word that gets parsed.
+    g.bench_function("reject/chrome", |b| b.iter(|| lightning_core::calc::eval(black_box("chrome"))));
+    g.bench_function("reject/7-zip", |b| b.iter(|| lightning_core::calc::eval(black_box("7-zip"))));
+    // Every keystroke pays this one.
+    g.bench_function("is_math/chrome", |b| b.iter(|| lightning_core::calc::is_math(black_box("chrome"))));
+    g.bench_function("percent", |b| b.iter(|| lightning_core::calc::eval(black_box("200 + 10% + 20% of 150"))));
+    g.finish();
+}
+
+fn bench_power(c: &mut Criterion) {
+    let mut g = c.benchmark_group("power");
+    // "chrome" is the rejection cost every ordinary query pays.
+    for q in ["chrome", "visual studio", "s", "shut", "power"] {
+        g.bench_function(q, |b| b.iter(|| lightning_core::power::matches(black_box(q))));
+    }
+    g.finish();
+}
+
 fn bench_files(c: &mut Criterion) {
     let root = corpus();
     let index = FileIndex::new(vec![root]);
@@ -123,5 +144,5 @@ fn bench_index_build(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_fuzzy, bench_engine_no_files, bench_files, bench_index_build);
+criterion_group!(benches, bench_fuzzy, bench_engine_no_files, bench_calc, bench_power, bench_files, bench_index_build);
 criterion_main!(benches);

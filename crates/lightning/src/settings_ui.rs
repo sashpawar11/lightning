@@ -338,12 +338,7 @@ impl Settings {
         let fy = h - 40.0;
         t.fill_a(rect(0.0, fy, W, 40.0), pal.text, 0.03);
         t.fill_a(rect(0.0, fy, W, 1.0), pal.text, 0.08);
-        let ram = format!(
-            "RAM {:.1} MB · {} indexed",
-            platform::private_bytes() as f64 / (1024.0 * 1024.0),
-            indexed
-        );
-        t.text(&ram, &f.small, rect(PAD, fy, 280.0, 40.0), pal.muted);
+        t.text(&format!("{indexed} indexed"), &f.small, rect(PAD, fy, 280.0, 40.0), pal.muted);
         let q = rect(W - PAD - 44.0, fy + 6.0, 44.0, 28.0);
         t.text("Quit", &f.small_center, q, pal.text);
         self.hits.push((q, Ctl::Quit));

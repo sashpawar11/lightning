@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use lightning_core::power::{self, Action};
 use lightning_core::{Hit, Kind};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
@@ -31,6 +32,27 @@ const TILE_H: f32 = 52.0;
 const COLS: usize = 6;
 const GRID_H: f32 = 80.0;
 const CELL_W: f32 = (W - 40.0) / COLS as f32;
+
+/// Power shortcut buttons: size, gap, and the widest a button gets.
+const PBTN_H: f32 = 44.0;
+const PBTN_GAP: f32 = 8.0;
+const PBTN_MAX_W: f32 = 112.0;
+
+fn power_rect(k: usize, n: usize, y: f32) -> D2D_RECT_F {
+    let w = ((W - 40.0 - PBTN_GAP * (n.max(1) - 1) as f32) / n.max(1) as f32).min(PBTN_MAX_W);
+    rect(20.0 + k as f32 * (w + PBTN_GAP), y, w, PBTN_H)
+}
+
+fn power_glyph(a: Action) -> Glyph {
+    match a {
+        Action::Shutdown => glyph::POWER,
+        Action::Restart => glyph::RESTART,
+        Action::Sleep => glyph::DARK,
+        Action::SignOut => glyph::SIGN_OUT,
+        Action::Lock => glyph::LOCK,
+        Action::Hibernate => glyph::HIBERNATE,
+    }
+}
 
 const TILE_W: f32 = (W - 40.0 - 24.0) / 4.0;
 
@@ -91,6 +113,8 @@ enum Item {
     /// A row of recent tiles, starting at this hit index.
     Grid(usize),
     Tiles,
+    /// Power shortcut buttons: first hit index and how many.
+    Power(usize, usize),
     Empty,
 }
 
@@ -108,6 +132,8 @@ pub struct Overlay {
     icons: Vec<Option<Arc<Icon>>>,
     bitmaps: HashMap<usize, ID2D1Bitmap>,
     results_query: Option<String>,
+    /// The calculator owns the current results (see `Results::math`).
+    math: bool,
     sel: usize,
     scroll: f32,
     pub elapsed_us: u64,
@@ -119,6 +145,8 @@ pub struct Overlay {
     recents: (Vec<Hit>, Vec<Option<Arc<Icon>>>),
     last_mouse: (i32, i32),
     menu: Option<Menu>,
+    /// The power button waiting for its confirming second press.
+    armed: Option<Action>,
 }
 
 impl Overlay {
@@ -137,6 +165,7 @@ impl Overlay {
             icons: Vec::new(),
             bitmaps: HashMap::new(),
             results_query: None,
+            math: false,
             sel: 0,
             scroll: 0.0,
             elapsed_us: 0,
@@ -148,6 +177,7 @@ impl Overlay {
             recents: (Vec::new(), Vec::new()),
             last_mouse: (i32::MIN, i32::MIN),
             menu: None,
+            armed: None,
         }
     }
 
@@ -169,12 +199,14 @@ impl Overlay {
         // The last recents, so the window opens at its final size.
         (self.hits, self.icons) = self.recents.clone();
         self.results_query = Some(String::new());
+        self.math = false;
         self.sel = 0;
         self.scroll = 0.0;
         self.caret_on = true;
         self.hover = None;
         self.last_mouse = (i32::MIN, i32::MIN);
         self.menu = None;
+        self.armed = None;
     }
 
     pub fn drop_target(&mut self) {
@@ -197,6 +229,7 @@ impl Overlay {
         let same_query = self.results_query.as_deref() == Some(resp.results.query.as_str());
         self.elapsed_us = resp.results.elapsed_us;
         self.hits = resp.results.hits;
+        self.math = resp.results.math;
         self.icons = resp.icons;
         self.results_query = Some(resp.results.query);
         if self.results_query.as_deref() == Some("") {
@@ -207,6 +240,7 @@ impl Overlay {
         } else {
             self.sel = 0;
             self.scroll = 0.0;
+            self.armed = None;
         }
         // Drop bitmaps for icons no longer referenced.
         let live: Vec<usize> = self.icons.iter().flatten().map(|i| Arc::as_ptr(i) as usize).collect();
@@ -263,12 +297,21 @@ impl Overlay {
         };
         let s = String::from_utf16_lossy(&units);
         if s.chars().all(|c| !c.is_control()) {
+            self.armed = None; // Enter's own WM_CHAR must not cancel it
             self.insert(&s, fx);
         }
     }
 
-    pub fn on_key(&mut self, vk: u16, fx: &mut Vec<Fx>) -> bool {
+    pub fn on_key(&mut self, vk: u16, repeat: bool, fx: &mut Vec<Fx>) -> bool {
         let ctrl = ctrl_down();
+        // Only a fresh Enter (or a click) can confirm; any other key cancels.
+        // Holding Enter must not count as the second press.
+        if vk == 0x0D && repeat && self.armed.is_some() {
+            return true;
+        }
+        if vk != 0x0D && self.armed.take().is_some() {
+            self.invalidate();
+        }
         if let Some(m) = &mut self.menu {
             match vk {
                 0x1B => self.close_menu(),
@@ -294,11 +337,12 @@ impl Overlay {
                 // Anything else closes the menu and acts as usual.
                 _ => {
                     self.close_menu();
-                    return self.on_key(vk, fx);
+                    return self.on_key(vk, repeat, fx);
                 }
             }
             return true;
         }
+        let power = self.power_span();
         match vk {
             // Context-menu key or Shift+F10: the menu for the selection.
             0x5D => self.open_menu_at_sel(),
@@ -306,6 +350,13 @@ impl Overlay {
             // One press always closes; the query is kept and pre-selected
             // on the next show, so typing replaces it.
             0x1B => fx.push(Fx::HideOverlay),
+            0x09 if power.contains(&self.sel) => self.cycle_power(power, if shift_down() { -1 } else { 1 }),
+            0x27 if power.contains(&self.sel) && self.caret == self.query.len() && self.sel + 1 < power.end => {
+                self.move_sel(1)
+            }
+            0x25 if power.contains(&self.sel) && self.sel > power.start && self.caret == self.query.len() => {
+                self.move_sel(-1)
+            }
             0x28 if self.idle() => self.move_grid(COLS as isize),
             0x26 if self.idle() => self.move_grid(-(COLS as isize)),
             0x27 if self.idle() => self.move_sel(1),
@@ -419,6 +470,7 @@ impl Overlay {
             let hit = match item {
                 Item::Row(i) => i == self.sel,
                 Item::Grid(start) => (start..start + COLS).contains(&self.sel),
+                Item::Power(start, n) => (start..start + n).contains(&self.sel),
                 _ => false,
             };
             if hit {
@@ -434,8 +486,29 @@ impl Overlay {
         }
     }
 
+    /// Hit indices of the power buttons, which are always contiguous.
+    fn power_span(&self) -> std::ops::Range<usize> {
+        let start = self.hits.iter().position(|h| h.kind == Kind::Power).unwrap_or(0);
+        start..start + self.hits[start..].iter().take_while(|h| h.kind == Kind::Power).count()
+    }
+
+    fn cycle_power(&mut self, span: std::ops::Range<usize>, d: isize) {
+        let n = span.len() as isize;
+        self.sel = span.start + ((self.sel - span.start) as isize + d).rem_euclid(n) as usize;
+        self.invalidate();
+    }
+
     fn launch(&mut self, i: usize, reveal: bool, fx: &mut Vec<Fx>) {
         if let Some(hit) = self.hits.get(i) {
+            if hit.kind == Kind::Power {
+                if let Some(a) = Action::from_target(&hit.target) {
+                    if power::activate(&mut self.armed, a) {
+                        fx.push(Fx::Power(a));
+                    }
+                    self.invalidate();
+                }
+                return;
+            }
             fx.push(Fx::Launch { hit: hit.clone(), reveal });
         }
     }
@@ -460,6 +533,12 @@ impl Overlay {
             Item::Grid(start) => {
                 let i = start + ((x - 20.0) / CELL_W).floor().clamp(0.0, COLS as f32 - 1.0) as usize;
                 ((20.0..W - 20.0).contains(&x) && i < self.hits.len()).then_some(i)
+            }
+            Item::Power(start, n) => {
+                (0..n).find(|&k| {
+                    let r = power_rect(k, n, 0.0);
+                    x >= r.left && x < r.right
+                }).map(|k| start + k)
             }
             _ => None,
         }
@@ -508,7 +587,11 @@ impl Overlay {
             }
             return;
         }
-        if let Some(i) = self.hit_at(x, y) {
+        let hit = self.hit_at(x, y);
+        if hit.is_none_or(|i| self.hits[i].kind != Kind::Power) && self.armed.take().is_some() {
+            self.invalidate();
+        }
+        if let Some(i) = hit {
             self.launch(i, ctrl_down(), fx);
             return;
         }
@@ -544,7 +627,7 @@ impl Overlay {
         let (path, args) = match hit.kind {
             Kind::File => (Some(hit.target.clone()), None),
             Kind::App => platform::app_exe(&hit.target).map_or((None, None), |(p, a)| (Some(p), a)),
-            Kind::Setting => return,
+            Kind::Setting | Kind::Calc | Kind::Power => return,
         };
         // Packaged app ids are AUMIDs: `PackageFamilyName!AppId`.
         let packaged = hit.kind == Kind::App && path.is_none() && hit.target.contains('!');
@@ -642,12 +725,18 @@ impl Overlay {
             }
         }
         for (i, h) in self.hits.iter().enumerate().filter(|_| !idle) {
+            // The buttons share one row.
+            if h.kind == Kind::Power && prev == Some(Kind::Power) {
+                continue;
+            }
             let label = if prev != Some(h.kind) {
-                Some(match h.kind {
-                    Kind::App => "Applications",
-                    Kind::File => "Files",
-                    Kind::Setting => "Settings",
-                })
+                match h.kind {
+                    Kind::Calc => None,
+                    Kind::Power => Some("Power shortcuts"),
+                    Kind::App => Some("Applications"),
+                    Kind::File => Some("Files"),
+                    Kind::Setting => Some("Settings"),
+                }
             } else {
                 None
             };
@@ -656,8 +745,14 @@ impl Overlay {
                 out.push((y, lh, Item::Label(l)));
                 y += lh;
             }
-            out.push((y, ROW_STEP, Item::Row(i)));
-            y += ROW_STEP;
+            if h.kind == Kind::Power {
+                let n = self.power_span().len();
+                out.push((y, PBTN_H + 8.0, Item::Power(i, n)));
+                y += PBTN_H + 8.0;
+            } else {
+                out.push((y, ROW_STEP, Item::Row(i)));
+                y += ROW_STEP;
+            }
             prev = Some(h.kind);
         }
         if idle {
@@ -665,7 +760,7 @@ impl Overlay {
             out.push((y, lh, Item::Label("Quick settings")));
             y += lh;
             out.push((y, TILE_H, Item::Tiles));
-        } else if self.hits.is_empty() && self.results_query.as_deref() == Some(self.query.as_str()) {
+        } else if self.hits.is_empty() && !self.math && self.results_query.as_deref() == Some(self.query.as_str()) {
             out.push((y, 120.0, Item::Empty));
         }
         out
@@ -676,7 +771,13 @@ impl Overlay {
     }
 
     fn list_h(&self) -> f32 {
-        self.content_height().clamp(MIN_LIST_H, MAX_LIST_H)
+        // A calculator answer (or none yet) needs no filler below it.
+        let min = if self.answer_only() { 0.0 } else { MIN_LIST_H };
+        self.content_height().clamp(min, MAX_LIST_H)
+    }
+
+    fn answer_only(&self) -> bool {
+        self.math && !self.idle()
     }
 
     /// Window height (DIPs) that fits the current content.
@@ -774,6 +875,26 @@ impl Overlay {
                         t.text(status, &f.small, rect(tx, y + 27.0, tw - 56.0, 16.0), sub);
                     }
                 }
+                Item::Power(start, n) => {
+                    for k in 0..n {
+                        let r = power_rect(k, n, y);
+                        let Some(a) = Action::from_target(&self.hits[start + k].target) else { continue };
+                        let armed = self.armed == Some(a);
+                        let (ink, name) = if armed {
+                            t.fill_round(r, 10.0, pal.accent);
+                            (pal.on_accent, "Confirm")
+                        } else {
+                            let sel = start + k == self.sel;
+                            t.fill_round_a(r, 10.0, pal.text, if sel { 0.12 } else { 0.06 });
+                            if sel {
+                                t.stroke_round_a(r, 10.0, pal.accent, 0.8, 1.5);
+                            }
+                            (pal.text, self.hits[start + k].title.as_str())
+                        };
+                        t.icon(gfx, power_glyph(a), 20.0, rect(r.left + 4.0, y, 26.0, PBTN_H), ink);
+                        t.text(name, &f.small, rect(r.left + 31.0, y, r.right - r.left - 32.0, PBTN_H), ink);
+                    }
+                }
                 Item::Empty => {
                     let msg = if self.scanning { "No matches yet. Still indexing…" } else { "No matches. Try fewer letters." };
                     t.text(msg, &f.small_center, rect(0.0, y + 40.0, W, 20.0), pal.muted);
@@ -798,7 +919,13 @@ impl Overlay {
         }
         let ink = if self.hover == Some(Hover::Gear) { pal.text } else { pal.muted };
         t.icon(gfx, glyph::SETTING, 18.0, gear, ink);
-        let hints = if idle { "Esc Close" } else { "Ctrl+Enter Reveal     Esc Close" };
+        let hints = if idle {
+            "Esc Close"
+        } else if self.answer_only() {
+            if self.hits.is_empty() { "Esc Close" } else { "Ctrl+C Copy     Esc Close" }
+        } else {
+            "Ctrl+Enter Reveal     Esc Close"
+        };
         let hw = gfx.text_width(hints, &f.small);
         t.text(hints, &f.small, rect(gear.left - 12.0 - hw, fy, hw + 2.0, FOOT_H), pal.muted);
 
@@ -847,7 +974,8 @@ impl Overlay {
             let g = match self.hits[i].kind {
                 Kind::App => glyph::APPS,
                 Kind::File => glyph::PAGE,
-                Kind::Setting => glyph::SETTING,
+                Kind::Setting | Kind::Calc => glyph::SETTING,
+                Kind::Power => glyph::POWER,
             };
             t.fill_round_a(tile, 8.0, pal.text, 0.07);
             t.icon(gfx, g, 18.0, tile, pal.text);
@@ -867,6 +995,23 @@ impl Overlay {
     fn paint_row(&mut self, gfx: &Gfx, t: &Target, pal: &Palette, i: usize, y: f32) {
         let f = &gfx.fonts;
         let selected = i == self.sel;
+        let hit = &self.hits[i];
+        if hit.kind == Kind::Calc {
+            // The answer: accent-tinted, larger, no icon.
+            let r = rect(10.0, y, W - 20.0, ROW_H);
+            t.fill_round_a(r, 10.0, pal.accent, pal.match_tint);
+            t.stroke_round_a(r, 10.0, pal.accent_ink, if selected { 0.5 } else { 0.25 }, 1.0);
+            let tw = W - 40.0 - 90.0;
+            t.text(&hit.title, &f.input, rect(24.0, y + 2.0, tw, 28.0), pal.text);
+            t.text(&hit.subtitle, &f.small, rect(24.0, y + 29.0, tw, 16.0), pal.muted);
+            if selected {
+                let cw = gfx.text_width("Copy", &f.small) + 16.0;
+                let r = rect(W - 22.0 - cw, y + 14.0, cw, 20.0);
+                t.fill_round_a(r, 6.0, pal.text, 0.08);
+                t.text("Copy", &f.small_center, r, pal.muted);
+            }
+            return;
+        }
         if selected {
             t.fill_round_a(rect(10.0, y, W - 20.0, ROW_H), 10.0, pal.text, if pal.dark { 0.08 } else { 0.06 });
         }
