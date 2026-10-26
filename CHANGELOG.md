@@ -8,6 +8,9 @@
 - **Calculations are instant and quiet.** While you type a calculation made of numbers and operators, Lightning shows only the answer (a running one for unfinished input like `355+`) and stops searching files, so the list no longer flickers. Dates and names like `2024-10-24` are still searched as files.
 - **Power shortcuts.** Type `shutdown`, `restart`, `sleep`, `sign out`, `lock`, `hibernate` (or `power`) and a row of buttons appears with the best match selected. While you are still typing a keyword (`sta`, `pow`) the buttons wait below your apps and files, so Enter never puts the PC to sleep when you meant to open something. `Enter`, a click, or Tab / arrow keys + `Enter` runs it. Shut down, Restart and Sign out ask for a second press (the button turns into **Confirm**; any other key or click cancels). They never force-close apps, so you can still save your work. Shut down and Restart don't opt in to installing Windows updates, but Windows may still finish updates it already staged.
 
+### Fixed
+- **No more constant disk reads in the background.** After indexing a drive, and again after every rescan, Lightning read every file under 10 MB from start to end, gigabytes per pass, which also caused CPU and memory spikes. It now only lists file names, so once indexing finishes the disk stays quiet.
+
 ## 0.4.0 · 2026-10-22
 
 ### New

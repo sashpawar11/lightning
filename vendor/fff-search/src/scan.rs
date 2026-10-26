@@ -342,15 +342,10 @@ impl ScanJob {
                     &signals.cancelled,
                 );
             }
-        } else {
-            // this potentially a long running as we are not parallelizing it but it's okay
-            sniff_binary_for_non_indexable(
-                files,
-                &unsafe_snapshot.base_path,
-                arena,
-                &signals.cancelled,
-            );
         }
+        // lightning: without content indexing nothing greps, so the binary
+        // flag is never read. Sniffing read every file under 10 MB to the end
+        // after each scan and rescan: gigabytes per pass on whole drives.
 
         // TODO Skipped as potentially unsafe - figure this out later
         // if config.warmup && !signals.cancelled.load(Ordering::Acquire) {
