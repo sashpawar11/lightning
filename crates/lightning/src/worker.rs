@@ -149,7 +149,7 @@ fn run(
         // indexing, refresh the visible results as more files arrive.
         let wait = if files_pending.is_some() {
             Some(Duration::from_millis(20))
-        } else if scanning && !last.as_ref().is_some_and(|(_, q)| engine.sources.calc && calc::is_math(q)) {
+        } else if scanning && !last.as_ref().is_some_and(|(_, q)| calc::is_math(q)) {
             Some(Duration::from_millis(400))
         } else {
             None

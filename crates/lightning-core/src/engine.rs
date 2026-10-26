@@ -76,8 +76,6 @@ pub struct Sources {
     pub apps: bool,
     pub files: bool,
     pub settings: bool,
-    pub calc: bool,
-    pub power: bool,
 }
 
 struct Launch {
@@ -117,7 +115,7 @@ impl Engine {
             tasks: Vec::new(),
             prepared: SETTINGS.iter().map(|s| Prepared::new(s.title, s.keywords)).collect(),
             files,
-            sources: Sources { apps: true, files: true, settings: true, calc: true, power: true },
+            sources: Sources { apps: true, files: true, settings: true },
             matcher: Matcher::default(),
             history,
             history_path,
@@ -147,7 +145,7 @@ impl Engine {
     pub fn search(&mut self, query: &str) -> Results {
         let start = Instant::now();
         // Arithmetic is the whole answer: no other source is searched.
-        if self.sources.calc && calc::is_math(query) {
+        if calc::is_math(query) {
             return Results {
                 query: query.to_owned(),
                 hits: calc::eval_partial(query).map(|a| calc_hit(query, a)).into_iter().collect(),
@@ -169,10 +167,8 @@ impl Engine {
                 target: l.target.clone(),
             }));
         } else {
-            if self.sources.calc
-                && let Some(answer) = calc::eval(query)
-            {
-                hits.push(calc_hit(query, answer));
+            if let Some(hit) = calc_answer(query) {
+                hits.push(hit);
             }
             let (apps, best_app) = if self.sources.apps { self.search_apps() } else { (Vec::new(), 0) };
             let (settings, best_setting) =
@@ -212,30 +208,14 @@ impl Engine {
                 if best_setting > best_app { (settings, apps) } else { (apps, settings) };
             // A whole keyword ("lock") puts the buttons first, pre-selected.
             // The start of one ("sta", "pow") could be an app, so they go last.
-            let buttons: Vec<Hit> = if self.sources.power {
-                power::matches(query)
-                    .into_iter()
-                    .map(|p| Hit {
-                        kind: Kind::Power,
-                        title: p.label.into(),
-                        subtitle: "Power shortcuts".into(),
-                        ranges: Vec::new(),
-                        target: p.action.target(),
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let lead_buttons = !buttons.is_empty() && power::is_exact(query);
-            if lead_buttons {
-                hits.extend(buttons.iter().cloned());
+            let mut buttons = power_hits(query);
+            if !buttons.is_empty() && power::is_exact(query) {
+                hits.append(&mut buttons);
             }
             hits.extend(lead);
             hits.extend(files);
             hits.extend(trail);
-            if !buttons.is_empty() && !lead_buttons {
-                hits.extend(buttons);
-            }
+            hits.append(&mut buttons);
         }
         Results {
             query: query.to_owned(),
@@ -342,6 +322,28 @@ impl Engine {
             let _ = std::fs::write(p, format_history(&self.history));
         }
     }
+}
+
+// The two helpers below stay out of line so the rare paths don't change how
+// the compiler lays out `search` for ordinary queries (measured: ~5% on
+// `benches/cycles.rs` when inlined).
+#[inline(never)]
+fn calc_answer(query: &str) -> Option<Hit> {
+    calc::eval(query).map(|a| calc_hit(query, a))
+}
+
+#[inline(never)]
+fn power_hits(query: &str) -> Vec<Hit> {
+    power::matches(query)
+        .into_iter()
+        .map(|p| Hit {
+            kind: Kind::Power,
+            title: p.label.into(),
+            subtitle: "Power shortcuts".into(),
+            ranges: Vec::new(),
+            target: p.action.target(),
+        })
+        .collect()
 }
 
 fn calc_hit(query: &str, answer: String) -> Hit {
@@ -454,8 +456,6 @@ mod tests {
         assert_eq!(e.search("power").hits[0].kind, Kind::Power);
         assert_eq!(e.search("lock").hits[0].title, "Lock");
         assert!(e.search("chrome").hits.iter().all(|h| h.kind != Kind::Power));
-        e.sources.power = false;
-        assert!(e.search("shut").hits.iter().all(|h| h.kind != Kind::Power));
     }
 
     #[test]
@@ -491,8 +491,6 @@ mod tests {
         let hit = e.search("5+2").hits[0].clone();
         e.record_launch(&hit);
         assert!(e.search("").hits.is_empty());
-        e.sources.calc = false;
-        assert!(e.search("5+2").hits.iter().all(|h| h.kind != Kind::Calc));
     }
 
     #[test]

@@ -20,8 +20,6 @@ pub struct Config {
     pub search_apps: bool,
     pub search_files: bool,
     pub search_settings: bool,
-    pub calculator: bool,
-    pub search_power: bool,
     pub launch_at_startup: bool,
     /// Keep the overlay up when another window takes focus.
     pub always_on_top: bool,
@@ -36,8 +34,6 @@ impl Default for Config {
             search_apps: true,
             search_files: true,
             search_settings: true,
-            calculator: true,
-            search_power: true,
             launch_at_startup: false,
             always_on_top: false,
         }
@@ -78,8 +74,6 @@ impl Config {
             apps: self.search_apps,
             files: self.search_files,
             settings: self.search_settings,
-            calc: self.calculator,
-            power: self.search_power,
         }
     }
 }
