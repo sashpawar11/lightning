@@ -45,6 +45,10 @@ pub static ACTIONS: &[PowerAction] = &[
 /// Shorter queries are too ambiguous to show buttons for.
 const MIN_QUERY: usize = 3;
 
+/// First letters of every keyword (kept in sync by a test), so most queries
+/// are rejected on one byte.
+const FIRST: &[u8] = b"hlprst";
+
 impl Action {
     pub fn info(self) -> &'static PowerAction {
         ACTIONS.iter().find(|p| p.action == self).expect("every action is in the table")
@@ -65,7 +69,7 @@ impl Action {
 /// when something matches; rejection is a few byte compares.
 pub fn matches(query: &str) -> Vec<&'static PowerAction> {
     let q = query.trim().as_bytes();
-    if q.len() < MIN_QUERY {
+    if q.len() < MIN_QUERY || !FIRST.contains(&q[0].to_ascii_lowercase()) {
         return Vec::new();
     }
     // 2 = whole keyword typed, 1 = prefix of one.
@@ -121,6 +125,13 @@ mod tests {
         assert_eq!(first(" sleep "), Some(Action::Sleep));
         assert_eq!(first("lock"), Some(Action::Lock));
         assert_eq!(first("hiber"), Some(Action::Hibernate));
+    }
+
+    #[test]
+    fn first_letters_cover_every_keyword() {
+        for k in ACTIONS.iter().flat_map(|p| p.keywords) {
+            assert!(FIRST.contains(&k.as_bytes()[0]), "{k}");
+        }
     }
 
     #[test]

@@ -243,32 +243,42 @@ impl Parser<'_> {
     }
 
     /// Digits with optional `1,000` grouping and a decimal part.
+    /// Parsed in place; only grouped numbers are copied, to a stack buffer.
     fn number(&mut self) -> Option<f64> {
         let b = self.s.as_bytes();
-        let mut text = String::new();
-        let digits = |i: &mut usize, text: &mut String| {
-            while *i < b.len() && b[*i].is_ascii_digit() {
-                text.push(b[*i] as char);
-                *i += 1;
+        let digits = |mut i: usize| {
+            while b.get(i).is_some_and(u8::is_ascii_digit) {
+                i += 1;
             }
+            i
         };
-        let mut i = self.i;
-        digits(&mut i, &mut text);
+        let start = self.i;
+        let mut i = digits(start);
+        let mut grouped = false;
         // A comma groups only when exactly three digits follow.
         while b.get(i) == Some(&b',')
             && b.get(i + 1..i + 4).is_some_and(|g| g.iter().all(u8::is_ascii_digit))
             && !b.get(i + 4).is_some_and(u8::is_ascii_digit)
         {
-            text.push_str(&self.s[i + 1..i + 4]);
+            grouped = true;
             i += 4;
         }
         if b.get(i) == Some(&b'.') {
-            text.push('.');
-            i += 1;
-            digits(&mut i, &mut text);
+            i = digits(i + 1);
         }
         self.i = i;
-        text.parse().ok()
+        let text = &b[start..i];
+        if !grouped {
+            return std::str::from_utf8(text).ok()?.parse().ok();
+        }
+        // `eval_partial` may append closing brackets, so up to twice MAX_LEN.
+        let mut buf = [0u8; 2 * MAX_LEN];
+        let mut n = 0;
+        for &c in text.iter().filter(|&&c| c != b',') {
+            buf[n] = c;
+            n += 1;
+        }
+        std::str::from_utf8(&buf[..n]).ok()?.parse().ok()
     }
 }
 
@@ -290,27 +300,51 @@ fn format(v: f64) -> Option<String> {
     if v == 0.0 {
         return Some("0".into());
     }
-    // "d.ddddddddddde±x": 12 significant digits, correctly rounded.
-    let sci = format!("{:.11e}", v.abs());
+    // "d.ddddddddddde±x": 12 significant digits, correctly rounded. Built on
+    // the stack; the answer is the only allocation.
+    use std::io::Write;
+    let mut sci = [0u8; 32];
+    let len = {
+        let mut w = &mut sci[..];
+        write!(w, "{:.11e}", v.abs()).ok()?;
+        32 - w.len()
+    };
+    let sci = std::str::from_utf8(&sci[..len]).ok()?;
     let (mant, exp) = sci.split_once('e')?;
     let exp: i32 = exp.parse().ok()?;
-    let digits: String = mant.chars().filter(|&c| c != '.').collect();
-    let digits = digits.trim_end_matches('0');
-    let digits = if digits.is_empty() { "0" } else { digits };
-    let sign = if v < 0.0 { "-" } else { "" };
-    let n = digits.len() as i32;
-    Some(if !(-7..15).contains(&exp) {
-        let (first, rest) = digits.split_at(1);
-        let dot = if rest.is_empty() { "" } else { "." };
-        format!("{sign}{first}{dot}{rest}e{exp}")
+    let (lead, frac) = mant.split_at(1);
+    let frac = frac.trim_start_matches('.').trim_end_matches('0');
+    let n = 1 + frac.len() as i32;
+    let mut out = String::with_capacity(24);
+    if v < 0.0 {
+        out.push('-');
+    }
+    let zeros = |out: &mut String, k: i32| out.extend(std::iter::repeat_n('0', k as usize));
+    if !(-7..15).contains(&exp) {
+        out.push_str(lead);
+        if !frac.is_empty() {
+            out.push('.');
+            out.push_str(frac);
+        }
+        out.push('e');
+        out.push_str(&exp.to_string());
     } else if exp < 0 {
-        format!("{sign}0.{}{digits}", "0".repeat((-exp - 1) as usize))
+        out.push_str("0.");
+        zeros(&mut out, -exp - 1);
+        out.push_str(lead);
+        out.push_str(frac);
     } else if n <= exp + 1 {
-        format!("{sign}{digits}{}", "0".repeat((exp + 1 - n) as usize))
+        out.push_str(lead);
+        out.push_str(frac);
+        zeros(&mut out, exp + 1 - n);
     } else {
-        let (int, frac) = digits.split_at(exp as usize + 1);
-        format!("{sign}{int}.{frac}")
-    })
+        let (int, rest) = frac.split_at(exp as usize);
+        out.push_str(lead);
+        out.push_str(int);
+        out.push('.');
+        out.push_str(rest);
+    }
+    Some(out)
 }
 
 #[cfg(test)]
