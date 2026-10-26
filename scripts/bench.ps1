@@ -61,8 +61,10 @@ if ($SaveBaseline) {
         Copy-Item (Join-Path $b.Dir $median) $main -Recurse
         1..3 | ForEach-Object { Remove-Item (Join-Path $b.Dir "run$_") -Recurse -Force -ErrorAction SilentlyContinue }
     }
-    Measure-IndexMemory | ConvertTo-Json | Set-Content -Encoding ascii $budgetFile
-    Write-Host "Baseline saved (median of 3 runs)." -ForegroundColor Green
+    # One probe can land ~10% low; the median of 5 is a budget that holds.
+    $probes = 1..5 | ForEach-Object { Measure-IndexMemory } | Sort-Object private_mb
+    $probes[2] | ConvertTo-Json | Set-Content -Encoding ascii $budgetFile
+    Write-Host "Baseline saved (median of 3 runs; memory median of 5)." -ForegroundColor Green
     exit 0
 }
 

@@ -226,6 +226,7 @@ impl Engine {
         }
     }
 
+    #[inline(never)]
     fn search_apps(&mut self) -> (Vec<Hit>, i32) {
         let mut scored: Vec<(i32, usize, Ranges)> = Vec::new();
         for (i, app) in self.apps.iter().enumerate() {
@@ -256,6 +257,7 @@ impl Engine {
         (hits, best)
     }
 
+    #[inline(never)]
     fn search_settings(&mut self) -> (Vec<Hit>, i32) {
         // Settings pages and Control Panel tasks rank together.
         let titles = SETTINGS.iter().map(|s| s.title).chain(self.tasks.iter().map(|t| t.name.as_str()));

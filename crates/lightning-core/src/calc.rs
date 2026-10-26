@@ -69,6 +69,19 @@ pub fn eval(query: &str) -> Option<String> {
     if b.len() > MAX_LEN || !b.iter().any(|&c| matches!(c, b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'(') || c >= 0x80) {
         return None;
     }
+    // Names with an operator (`7-zip`, `wi-fi`): a second scan rejects any
+    // word the parser doesn't know, which is far cheaper than a failed parse.
+    let mut i = 0;
+    while i < b.len() {
+        let start = i;
+        while i < b.len() && b[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        if i > start && !is_word(&b[start..i]) {
+            return None;
+        }
+        i += 1;
+    }
     let mut p = Parser { s: query, i: 0, computed: false, pct: false };
     let v = p.expr()?.0;
     p.skip_ws();
@@ -282,6 +295,11 @@ impl Parser<'_> {
     }
 }
 
+/// A word the parser accepts: a constant, `of`, or a function name.
+fn is_word(w: &[u8]) -> bool {
+    ["pi", "e", "of"].iter().chain(FUNCTIONS.iter().map(|(n, _)| n)).any(|n| w.eq_ignore_ascii_case(n.as_bytes()))
+}
+
 fn word_of(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() >= 2 && b[..2].eq_ignore_ascii_case(b"of") && !b.get(2).is_some_and(u8::is_ascii_alphabetic)
@@ -420,7 +438,7 @@ mod tests {
             "", "   ", "2024", "3.14", "pi", "e", "7zip", "7-zip", "3d builder", "chrome", "5+", "+", "-5",
             "(5)", "(2", "2)", "1/0", "0/0", "5%0", "sqrt(-1)", "ln(0)", "10^999", "2^1024", "abs", "abs(",
             "sqrt 16", "foo(2)", "1,00+2", "5 5", "2++", "*2", "c:\\temp", "report-2024.pdf", "2 + two",
-            "10% of", "of 5", "5 of 3", "10 of",
+            "10% of", "of 5", "5 of 3", "10 of", "pi-hole", "Wi-Fi",
         ];
         for q in cases {
             assert_eq!(eval(q), None, "{q:?}");
