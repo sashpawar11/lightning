@@ -21,10 +21,15 @@ pub mod glyph {
     pub const BLUETOOTH: Glyph = Glyph(10);
     pub const ADMIN: Glyph = Glyph(11);
     pub const FOLDER: Glyph = Glyph(12);
+    pub const POWER: Glyph = Glyph(13);
+    pub const RESTART: Glyph = Glyph(14);
+    pub const SIGN_OUT: Glyph = Glyph(15);
+    pub const LOCK: Glyph = Glyph(16);
+    pub const HIBERNATE: Glyph = Glyph(17);
 }
 
 /// Path data in a 20×20 box, in [`glyph`] order. Names are the Fluent ones.
-pub const PATHS: [&str; 13] = [
+pub const PATHS: [&str; 18] = [
     // flash
     "M6.2 2.77C6.31 2.31 6.73 2 7.2 2h5.25c.73 0 1.24.71 1 1.4L12.22 7h2.56c.95 0 1.4 1.14.77 1.81l-8.68 8.86c-.76.79-2.06.06-1.8-1L6.23 12H4.96c-.7 0-1.21-.68-1.02-1.36zM7.2 3a.1.1 0 0 0-.06.05L4.9 10.92q0 .07.06.08h1.91a.5.5 0 0 1 .49.62l-1.33 5.3v.04l.03.03.04.01h.01l.03-.02 8.68-8.86.01-.03v-.05l-.03-.03-.03-.01H11.5a.5.5 0 0 1-.47-.67l1.5-4.25a.06.06 0 0 0-.07-.08z",
     // apps
@@ -51,6 +56,16 @@ pub const PATHS: [&str; 13] = [
     "M9.72 2.08a.5.5 0 0 1 .56 0q2.9 1.94 6.3 2.43A.5.5 0 0 1 17 5v4.5c0 3.9-2.3 6.73-6.82 8.47a.5.5 0 0 1-.36 0C5.31 16.23 3 13.39 3 9.5V5a.5.5 0 0 1 .43-.5 15 15 0 0 0 6.3-2.42M9.6 3.35A16 16 0 0 1 4 5.43V9.5c0 3.4 1.97 5.86 6 7.46 4.03-1.6 6-4.07 6-7.46V5.43a16 16 0 0 1-5.6-2.08L10 3.1z",
     // folder_open
     "M3 5.5v6.6l1.5-2.6A3 3 0 0 1 7.1 8H15v-.5c0-.83-.67-1.5-1.5-1.5h-4a.5.5 0 0 1-.35-.15l-1.71-1.7A.5.5 0 0 0 7.09 4H4.5C3.67 4 3 4.67 3 5.5m1.28 10.48.22.02h9.4a2 2 0 0 0 1.73-1l2.17-3.75A1.5 1.5 0 0 0 16.5 9H7.1a2 2 0 0 0-1.73 1L3.2 13.75a1.5 1.5 0 0 0 1.08 2.23M2 14.46V5.5A2.5 2.5 0 0 1 4.5 3h2.59c.4 0 .78.16 1.06.44L9.7 5h3.79A2.5 2.5 0 0 1 16 7.5V8h.5a2.5 2.5 0 0 1 2.16 3.75L16.5 15.5a3 3 0 0 1-2.6 1.5H4.5a2.5 2.5 0 0 1-1.62-.6A2.5 2.5 0 0 1 2 14.46",
+    // power: ring open at the top, bar through the gap
+    "M9.25 2h1.5v8h-1.5zM4.7 5.7A7.5 7.5 0 1 0 15.3 5.7L14.24 6.76A6 6 0 1 1 5.76 6.76z",
+    // restart: ring open at the top right, arrowhead at its end
+    "M14.95 6.05A7 7 0 1 1 10 4V5.5A5.5 5.5 0 1 0 13.89 7.11zM9.5 1.5l4.5 3.25L9.5 8z",
+    // sign out: open door frame, arrow leaving it
+    "M4 3h6v1.5H5.5v11H10V17H4zM9 9.25h6.2l-2-2 1.05-1.05L18.1 10l-3.85 3.8-1.05-1.05 2-2H9z",
+    // lock: shackle over a body
+    "M6.5 9V6.5a3.5 3.5 0 0 1 7 0V9H12V6.5a2 2 0 0 0-4 0V9zM5 9h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z",
+    // hibernate: arrow down into a tray
+    "M9.25 3h1.5v8.2l2.2-2.2 1.05 1.05L10 14 6 10.05 7.05 9l2.2 2.2zM4 15.5h12V17H4z",
 ];
 
 pub type Pt = (f32, f32);

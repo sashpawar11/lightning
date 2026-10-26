@@ -10,5 +10,8 @@ with a `lightning:` comment:
 - `src/file_picker.rs`: no binary sniffing of changed files. It read each
   created or modified file to the end while holding the picker write lock,
   so large downloads caused heavy disk reads and blocked searches.
+- `src/scan.rs`: no binary sniffing after a scan unless content indexing is
+  on. It read every file under 10 MB to the end after each scan and rescan,
+  gigabytes per pass on whole drives, for a flag only grep uses.
 - `src/constants.rs`: watcher-triggered full rescans at most every 5 min
   (15 min above 250k files), down from every 30 s.
