@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 · 2026-10-27
 
 ### New
 - **Calculator.** Type a calculation like `5+2`, `(1,250*3)/4` or `sqrt(16)^2` and the answer appears as the first result. **Enter** copies it and closes Lightning; **Ctrl+C** copies it and keeps the overlay open. It understands `+ - * / % ^`, `×` `÷`, parentheses, `pi`, `e` and `sqrt abs sin cos tan ln log round floor ceil`. Plain numbers and app names (`2024`, `7zip`) are never treated as math.

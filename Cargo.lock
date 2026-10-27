@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "lightning"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "embed-resource",
  "lightning-core",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "lightning-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "criterion",
  "fff-search",
